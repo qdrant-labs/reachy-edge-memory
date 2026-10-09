@@ -37,12 +37,13 @@ class DisplaySink(Protocol):
         ...
 
     def on_recall(self, hits: list[dict]) -> None:
-        """Frames recalled this turn (FrameMemory.recall hits, each with a
-        jpeg + YOLO detections); the sink shows them boxed (see WebDashboard)."""
+        """Frames recalled this turn (FrameMemory.recall_text hits, the
+        day_frames or a look, each with a jpeg + YOLO detections); the sink
+        shows them boxed (see WebDashboard)."""
         ...
 
     def on_speech_recall(self, hits: list[dict]) -> None:
-        """Past utterances recalled this turn (TextMemory.recall hits, each
+        """Past utterances recalled this turn (TextMemory.recall_exchanges hits, each
         with `text` + `score`) — search by what was said."""
         ...
 

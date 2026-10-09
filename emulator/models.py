@@ -53,6 +53,10 @@ MODELS: dict[str, Model] = {
                             file="moonshine_tiny_5s_f32.tflite"),
     "moonshine-tokenizer": Model(repo="UsefulSensors/moonshine-tiny",
                                  file="tokenizer.json"),
+    # Whether an utterance holds speech at all, before moonshine hears it
+    # (emulator/speech_detector.py). Silero VAD v5, MIT. Whisper on the laptop
+    # runs Silero too: v6, bundled with faster-whisper, under its own looser rule.
+    "silero-vad": Model(repo="onnx-community/silero-vad", file="onnx/model.onnx"),
     # Speech synthesis: the LiteRT graphs, their runtime (say.py) and the
     # espeak-ng text frontend, all from one repo (emulator/inflect_tts.py).
     "inflect-nano-v2": Model(repo="litert-community/Inflect-Nano-v2",

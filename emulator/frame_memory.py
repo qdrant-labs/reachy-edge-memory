@@ -1,19 +1,23 @@
 """What the robot saw: frames, as SigLIP 2 embeddings in its Qdrant Edge shard.
 
-The robot stores the frames it sees and can be asked, by voice, what it saw —
-answered cross-modally: the text query is embedded into the SAME space as the
-frames, so "something to drink from" finds the frame with a mug in it whether
-or not the detector named one. The detections ride along as payload metadata
-— for filtering and for the boxes drawn on the dashboard — never as the
-search key. A frame the robot has described also carries a `text` vector
-(bge) of its own words: labels, names, the side it looked, the caption.
+The robot stores the frames it sees and can be asked, by voice, what it saw.
+Every frame carries an `image` vector, and a `text` one when it has words.
+`image` is SigLIP's embedding of the picture: what the day's frames are picked
+by (day_frames — the most different ones). `text` is bge over the frame's own
+words — labels, names, the side it looked, the caption (frame_text) — and it
+is what a question about a thing finds (recall_text): measured, 32 right
+frames of 36 against a SigLIP text-to-image search's 8, so the conversation
+answers by the words and, when they hold nothing, by the day
+(demo/conversation.py).
 
-Torch-free: the onnx-community SigLIP2-base ONNX (vision + text) on the
-onnxruntime CPU EP, with the Hugging Face fast tokenizer. Measured on the
-laptop: ~36 ms per frame, ~10 ms per query; absent things top out around
-0.05-0.07 cosine while present ones sit around 0.10-0.15 — hence
-RECALL_MIN_SCORE, the gate that stops the robot "recalling" something it
-never saw.
+Only SigLIP's vision tower is loaded. Its text tower — 1.1 GB of ONNX against
+the vision tower's 0.37 GB — served that text-to-image search, and no gate
+on it held: an early eval set put absent things under 0.07 and present ones
+over 0.10, but on a laptop run's frames "a plant" scored 0.061 with a plant
+in view and "what did you see today?", which names nothing, 0.106.
+
+Torch-free: the onnx-community SigLIP2-base vision ONNX on the onnxruntime
+CPU EP. Measured on the laptop: ~36 ms per frame.
 
 The frames live in the `memory` shard beside the conversation
 (emulator/memory.py), told apart by `kind`; the JPEG travels in the payload,
@@ -36,21 +40,12 @@ if TYPE_CHECKING:
 
 logger = logging.getLogger(__name__)
 
-# onnx-community's SigLIP2-base as plain ONNX (vision + text towers + the
-# SentencePiece/Gemma tokenizer).
+# onnx-community's SigLIP2-base as plain ONNX; only its vision tower is used.
 MODEL_REPO = "onnx-community/siglip2-base-patch16-224-ONNX"
 IMAGE_SIZE = 224            # SigLIP2-base patch16-224
-MAX_TEXT_TOKENS = 64        # SigLIP pads text to a fixed 64
 COLLECTION = "frames"
 
-# Cosine floor for a recall hit. SigLIP's sigmoid training makes absolute
-# cosines small; on an eval set of our frames present objects landed ~0.10-0.15 and
-# absent queries ("a laptop", "a dog") topped out at ~0.07 — so this gate
-# rejects "recalls" of things never seen rather than always returning the
-# nearest frame. Tunable; start where the eval put the gap.
-RECALL_MIN_SCORE = 0.09
-
-# The gate on the OTHER frame search — the one over the frame's own words
+# The gate on the frame search — the one over the frame's own words
 # (frame_text: labels, names, the side it looked, the caption). bge cosine, so
 # the same scale as the conversation's 0.62, and calibrated the same way:
 # measured against this robot's 371 stored frames, a
@@ -59,6 +54,24 @@ RECALL_MIN_SCORE = 0.09
 # and a question no picture answers scores 0.55-0.63 ("what did we talk
 # about?" 0.590, "do you remember my name?" 0.630). 0.66 sits in the gap.
 FRAME_TEXT_MIN_SCORE = 0.66
+
+# A frame with nothing in it, in frame_text's own words: "I saw something".
+# Every labelled frame's words say "I saw ...", so a question about seeing
+# matches every such frame on that alone, whatever it names. Measured with bge on the 19 frames of
+# a run on the laptop: "What did you see?" scored 0.704 on "I saw person", "Did
+# you see a cup?" 0.676 on "I saw plant" — both over the gate, neither a match.
+# A frame counts only when it also beats this empty one, which is when its
+# CONTENT matched: there and on 150 frames written like the robot's, every
+# question that named nothing (14 of them) scored under the empty frame
+# (-0.023 at most), and every question about a thing that was there over it
+# (+0.075 at least) — "did you see Sasha?" by +0.173 even with Sasha in every
+# frame, which comparing the frames with each other would have lost. The
+# margins are not wide: "Did you see a dog?" with no dog anywhere scores 0.732
+# on "I saw person", over the gate, and only 0.025 under the empty frame. And
+# a question about people is about the "person" label: "who did you see
+# today?" scores 0.697 on "I saw person", over the empty frame's 0.675, and
+# gets that frame, not the day.
+EMPTY_FRAME = {"labels": ["something"]}
 
 # Where the robot can be asked to look (demo/chat_session.py's DIRECTIONS).
 LOOKED = ("ahead", "left", "right")
@@ -104,20 +117,17 @@ TEXT_VECTOR = "text"
 # JPEG quality for the frame kept in the payload (shown on the dashboard).
 JPEG_QUALITY = 80
 
-# Loading the ONNX sessions + tokenizer costs real wall time; share one loaded
+# Loading the ONNX session costs real wall time; share one loaded
 # embedder across FrameMemory instances in a process, as TextMemory does with
 # its fastembed model.
 _embedder_cache: dict[str, "SiglipEmbedder"] = {}
 
 
 class Embedder(Protocol):
-    """What FrameMemory needs from an embedder: aligned image/text vectors.
+    """What FrameMemory needs from an embedder: a picture's vector.
     Structural, so tests inject a tiny deterministic fake with no ONNX."""
 
     def embed_image(self, frame_rgb: "NDArray[np.uint8]") -> "NDArray[np.float32]":
-        ...
-
-    def embed_text(self, text: str) -> "NDArray[np.float32]":
         ...
 
 
@@ -126,9 +136,9 @@ def _l2(vec: "NDArray[np.float32]") -> "NDArray[np.float32]":
 
 
 class SiglipEmbedder:
-    """SigLIP 2 vision + text towers on the onnxruntime CPU EP.
+    """SigLIP 2's vision tower on the onnxruntime CPU EP.
 
-    Heavy deps (onnxruntime, tokenizers, huggingface_hub) are imported lazily
+    Heavy deps (onnxruntime, huggingface_hub) are imported lazily
     in __init__ — only a process that actually builds visual memory pays for
     them, the same reasoning as TextMemory's lazy fastembed import. The model
     files download once via huggingface_hub and are cached, exactly like
@@ -138,23 +148,14 @@ class SiglipEmbedder:
     def __init__(self, repo: str = MODEL_REPO) -> None:
         import onnxruntime as ort
         from huggingface_hub import hf_hub_download
-        from tokenizers import Tokenizer
 
-        cpu = ["CPUExecutionProvider"]
         self._vision = ort.InferenceSession(
-            hf_hub_download(repo, "onnx/vision_model.onnx"), providers=cpu)
-        self._text = ort.InferenceSession(
-            hf_hub_download(repo, "onnx/text_model.onnx"), providers=cpu)
+            hf_hub_download(repo, "onnx/vision_model.onnx"),
+            providers=["CPUExecutionProvider"])
         self._vision_in = self._vision.get_inputs()[0].name
-        self._text_inputs = {i.name for i in self._text.get_inputs()}
-        self._tokenizer = Tokenizer.from_file(hf_hub_download(repo, "tokenizer.json"))
-        # SigLIP: fixed-length pad to 64 (pad id 0 = </s>), truncate to 64.
-        self._tokenizer.enable_padding(length=MAX_TEXT_TOKENS, pad_id=0,
-                                       pad_token="</s>")
-        self._tokenizer.enable_truncation(MAX_TEXT_TOKENS)
 
     def _pooler(self, session, outputs) -> "NDArray[np.float32]":
-        # Both towers emit last_hidden_state + pooler_output; we want the
+        # The tower emits last_hidden_state + pooler_output; we want the
         # pooled [*,768] vector. Pick it by name (order isn't contractual).
         for out, spec in zip(outputs, session.get_outputs()):
             if "pool" in spec.name.lower():
@@ -178,14 +179,6 @@ class SiglipEmbedder:
         out = self._vision.run(None, {self._vision_in: arr})
         return _l2(self._pooler(self._vision, out))
 
-    def embed_text(self, text: str) -> "NDArray[np.float32]":
-        ids = self._tokenizer.encode(text.lower()).ids
-        feed = {"input_ids": np.asarray([ids], dtype=np.int64)}
-        if "attention_mask" in self._text_inputs:
-            feed["attention_mask"] = (feed["input_ids"] != 0).astype(np.int64)
-        out = self._text.run(None, feed)
-        return _l2(self._pooler(self._text, out))
-
 
 def _embedder(repo: str) -> "SiglipEmbedder":
     cached = _embedder_cache.get(repo)
@@ -196,44 +189,41 @@ def _embedder(repo: str) -> "SiglipEmbedder":
 
 
 class FrameMemory:
-    """Semantic store of frames the robot has seen, searchable by text.
+    """Store of frames the robot has seen, searchable by their words.
 
-    `remember(frame, detections)` embeds the whole frame (SigLIP image tower)
-    and upserts it with the YOLO detections + the jpeg as payload. `recall`
-    embeds the query (SigLIP text tower), does cosine nearest-neighbor over the
-    frames — optionally filtered to frames whose YOLO labels intersect
-    `must_labels` — and drops hits under `min_score` so a query for something
-    never seen returns nothing.
+    `remember(frame, detections)` embeds the whole frame (SigLIP's vision
+    tower) and upserts it with the YOLO detections + the jpeg as payload, and
+    the frame's words (frame_text) as a bge vector beside it. `recall_text`
+    searches those words; `day_frames` picks the day by picture.
 
     Called from two threads with no coordination of their own: SceneChangeWriter
     (below) drives `remember()` off the detect thread while the voice
-    thread's turn handler alternates `recall()`/`remember()` (see
-    demo/run_demo.py's `_handle_stream`). Neither the Qdrant Edge shard
-    nor `self._next_id` synchronises itself — a plain read-modify-write racing
-    the on-disk collection's own non-atomic payload/vector mutation — so
-    `_lock` below serialises every Qdrant client call. The embedding
-    (`embed_image`/`embed_text`) and jpeg encoding stay OUTSIDE the lock: they
+    thread's turn handler alternates reads (`recall_text()`, `day_frames()`)
+    with `remember()` (see
+    demo/run_demo.py's `_handle_stream`). The Qdrant Edge shard does not
+    synchronise itself — the on-disk collection's payload/vector mutation is
+    not atomic — so `_lock` below serialises every Qdrant client call. The embedding
+    (`embed_image`, bge) and jpeg encoding stay OUTSIDE the lock: they
     touch no shared state, and holding the lock through a SigLIP inference
     would stall the OTHER thread's Qdrant call on model compute for nothing.
     """
 
     def __init__(self, path: str | None = None, *, embedder: "Embedder | None" = None,
-                 repo: str = MODEL_REPO, min_score: float = RECALL_MIN_SCORE,
-                 store=None, text_embedder=None) -> None:
+                 repo: str = MODEL_REPO, store=None, text_embedder=None) -> None:
         """`store` is a shared EdgeStore with an `image` vector (and a `text`
-        one for captions) — the robot's `memory` shard, shared with the
-        conversation. `text_embedder` (bge, the fastembed shape) gives a
-        described frame its `text` vector."""
+        one for the frame's words) — the robot's `memory` shard, shared with
+        the conversation. `text_embedder` (bge, the fastembed shape) gives
+        every frame with words its `text` vector."""
         from emulator.edge_store import IMAGE, KIND, TEXT, EdgeStore
 
         self._embedder = embedder if embedder is not None else _embedder(repo)
         self._text_embedder = text_embedder
-        self._min_score = min_score
+        self._empty_vector = None  # EMPTY_FRAME's words, embedded on first use
         self._lock = threading.Lock()
-        # Size the shard from a real embedding (text tower — cheaper than
-        # encoding an image) so a different model can't silently mismatch the
-        # shard, mirroring TextMemory.
-        dim = len(self._embedder.embed_text("_"))
+        # Size the shard from a real embedding, so a different model can't
+        # silently mismatch the shard, mirroring TextMemory.
+        dim = len(self._embedder.embed_image(
+            np.zeros((IMAGE_SIZE, IMAGE_SIZE, 3), np.uint8)))
         if store is None:
             vectors = {IMAGE: dim}
             if text_embedder is not None:
@@ -299,7 +289,7 @@ class FrameMemory:
         vector = self._embedder.embed_image(frame_rgb)
         payload = {
             "detections": detections,
-            # a flat label list for MatchAny filtering (YOLO as metadata)
+            # a flat label list (YOLO as metadata): frame_text's words
             "labels": sorted({d["label"] for d in detections if d.get("label")}),
             "jpeg_b64": _encode_jpeg(frame_rgb),
             "ts": time.time(),
@@ -319,10 +309,8 @@ class FrameMemory:
         if text_vector is not None:
             vectors[TEXT_VECTOR] = text_vector
         with self._lock:
-            # id allocation + upsert must be one atomic step: two threads
-            # each reading `_next_id` before either increments it would
-            # upsert the SAME id, silently overwriting one frame with the
-            # other instead of storing both.
+            # id allocation + upsert as one step under the lock, like every
+            # other call into the shard (see the class docstring).
             point_id = self._store.new_id()
             self._store.add(point_id, vectors, payload)
         return point_id
@@ -363,12 +351,13 @@ class FrameMemory:
 
     def day_frames(self, limit: int = DAY_FRAMES, before: float | None = None,
                    min_distance: float = DAY_MIN_DISTANCE) -> list[dict]:
-        """The day as FRAMES, picked BY PICTURE — what "what did you see
-        today?" is answered with, newest first, each with its jpeg.
+        """The day as FRAMES, picked BY PICTURE — what a `seen` question no
+        frame's words answer gets: "what did you see today?", and "did you see
+        a dog?" with no dog in any frame — newest first, each with its jpeg.
 
-        Such a question names nothing to search for, so nothing is searched;
-        and the newest frames are not the day either. Measured on this robot's
-        own 371 frames: the newest 4 are the
+        recall_text finds nothing for such a question, and the newest frames
+        are not the day either.
+        Measured on this robot's own 371 frames: the newest 4 are the
         same picture four times — even the least similar PAIR of them is
         0.914. So the day is picked farthest-point on the `image` vector, the
         SigLIP embedding already stored with every frame: start from the
@@ -445,15 +434,17 @@ class FrameMemory:
     def recall_text(self, query: str, k: int = 3,
                     before: float | None = None) -> list[dict]:
         """Frames nearest to `query` BY THEIR WORDS — bge over frame_text,
-        gated at FRAME_TEXT_MIN_SCORE, best first.
+        gated at FRAME_TEXT_MIN_SCORE and at the empty frame (EMPTY_FRAME),
+        best first. Nothing back means no frame holds what the question asked
+        about — or that it asked about nothing in particular.
 
         This is the search for a question about a THING: "did you see a
         bottle?", "what was on the table?". Measured on this robot's own
         frames it finds 32 right frames out of 36 against the picture
         search's 8 (see frame_text) — the labels and the names were always
-        in the payload, and nothing searched them. The picture search stays
-        for what words cannot hold: "the one I showed you", a thing nobody
-        named."""
+        in the payload, and nothing searched them. The conversation answers
+        by these words and, when they hold nothing, by the day's pictures
+        (demo/conversation.py's _answer_tool)."""
         query = query.strip()
         if self._text_embedder is None or not query:
             return []
@@ -461,32 +452,22 @@ class FrameMemory:
         with self._lock:
             hits = self._store.search([float(x) for x in vector], k,
                                       self._frames(), using=TEXT_VECTOR)
-        hits = [hit for hit in hits if hit["score"] >= FRAME_TEXT_MIN_SCORE]
+        empty = self._empty_frame_score(vector)
+        hits = [hit for hit in hits
+                if hit["score"] >= FRAME_TEXT_MIN_SCORE and hit["score"] > empty]
         if before is not None:
             hits = [hit for hit in hits if hit.get("ts", 0.0) < before]
         return hits
 
-    def recall(self, query: str, k: int = 4,
-               must_labels: list[str] | None = None,
-               min_score: float | None = None) -> list[dict]:
-        query = query.strip()
-        if not query:
-            return []
-        from emulator.edge_store import all_of, match_any
-
-        query_filter = all_of(self._frames(),
-                              match_any("labels", must_labels) if must_labels else None)
-        # Text embedding runs OUTSIDE the lock, same reasoning as remember().
-        vector = self._embedder.embed_text(query)
-        with self._lock:
-            hits = self._store.search(vector.tolist(), k, query_filter, using=IMAGE_VECTOR)
-        # min_score=0.0 lets a caller take the best frame regardless of score.
-        # The demo does this for the frame handed to the LLM: no threshold can
-        # separate a recall question from a command (measured — see
-        # demo/run_demo.py), and the prompt gates the picture instead. The
-        # instance default still guards what the audience is shown.
-        floor = self._min_score if min_score is None else min_score
-        return [hit for hit in hits if hit["score"] >= floor]
+    def _empty_frame_score(self, query_vector) -> float:
+        """What `query_vector` scores against a frame with nothing in it
+        (EMPTY_FRAME), on the same cosine the store searches with."""
+        if self._empty_vector is None:
+            empty = np.asarray(next(iter(self._text_embedder.embed(
+                [self.frame_text(EMPTY_FRAME)]))), dtype=np.float32)
+            self._empty_vector = empty / max(float(np.linalg.norm(empty)), 1e-9)
+        query = np.asarray(query_vector, dtype=np.float32)
+        return float(query @ self._empty_vector) / max(float(np.linalg.norm(query)), 1e-9)
 
     def count(self) -> int:
         """How many frames are stored — the robot's side of "what it has

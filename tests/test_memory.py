@@ -116,9 +116,6 @@ def test_the_conversation_and_the_frames_share_one_shard_without_mixing():
         def embed_image(self, frame):
             return np.asarray([1.0, 0.0], np.float32)
 
-        def embed_text(self, text):
-            return np.asarray([1.0, 0.0], np.float32)
-
     store = EdgeStore(None, vectors={TEXT: 3, IMAGE: 2}, tenant_field=KIND)
     speech = TextMemory(store=store, embedder=Words())
     frames = FrameMemory(store=store, embedder=Pictures(), text_embedder=Words())

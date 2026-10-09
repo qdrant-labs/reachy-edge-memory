@@ -715,7 +715,6 @@ dependencies = [
     { name = "phonemizer" },
     { name = "pillow" },
     { name = "qdrant-edge-py" },
-    { name = "tokenizers" },
     { name = "unidecode" },
 ]
 
@@ -740,7 +739,6 @@ requires-dist = [
     { name = "phonemizer", specifier = ">=3.2" },
     { name = "pillow", specifier = ">=11.0" },
     { name = "qdrant-edge-py", specifier = ">=0.8.0" },
-    { name = "tokenizers", specifier = ">=0.20" },
     { name = "unidecode", specifier = ">=1.3" },
 ]
 

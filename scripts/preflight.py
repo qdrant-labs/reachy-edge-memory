@@ -147,7 +147,6 @@ def check_models() -> None:
         import numpy as np
 
         emb = SiglipEmbedder()
-        emb.embed_text("preflight")
         emb.embed_image(np.zeros((64, 64, 3), np.uint8))
         report(OK, "SigLIP (visual memory)", f"loaded in {time.time() - t0:.1f}s")
     except Exception as exc:  # noqa: BLE001

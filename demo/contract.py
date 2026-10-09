@@ -76,7 +76,7 @@ CHAT_PATH = "/chat"
 
 # Audio in, the words heard out. A separate endpoint from /chat because the
 # robot needs the text first: it is what the robot answers a name question
-# with, and what it drops as noise before the model ever sees it.
+# with, and what it drops when it holds no words before the model sees it.
 TRANSCRIBE_PATH = "/transcribe"
 
 # Fixed lines the robot speaks itself, without the model: greeting someone it

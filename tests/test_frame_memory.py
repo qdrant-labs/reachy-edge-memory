@@ -1,7 +1,7 @@
-"""FrameMemory: SigLIP whole-frame visual memory with YOLO metadata filtering.
+"""FrameMemory: SigLIP whole-frame visual memory, searched by its words.
 
 The SigLIP ONNX embedder is NOT loaded here — a deterministic one-hot fake
-stands in. The fake lets us assert the store/recall/filter/gate logic exactly.
+stands in. The fake lets us assert the store and read logic exactly.
 """
 from __future__ import annotations
 
@@ -15,24 +15,15 @@ from emulator.frame_memory import FrameMemory
 
 
 class FakeEmbedder:
-    """One-hot embedder so cosine is exactly 1.0 for a match, 0.0 otherwise.
-
-    An image's basis is selected by frame[0,0,0]; a text query's basis by a
-    keyword. So a "red" query aligns with a frame stamped 0, and orthogonal
-    (unseen) queries score 0 — below the gate.
-    """
+    """One-hot embedder: an image's basis is selected by frame[0,0,0], so two
+    frames stamped alike are the same picture (cosine 1.0) and two stamped
+    differently share nothing (0.0)."""
 
     _BASIS = {0: [1.0, 0.0, 0.0], 1: [0.0, 1.0, 0.0], 2: [0.0, 0.0, 1.0]}
-    _TEXT = {"red": [1.0, 0.0, 0.0], "green": [0.0, 1.0, 0.0],
-             "blue": [0.0, 0.0, 1.0]}
 
     def embed_image(self, frame_rgb):
         idx = int(np.asarray(frame_rgb)[0, 0, 0])
         return np.asarray(self._BASIS.get(idx, [0.0, 0.0, 0.0]), np.float32)
-
-    def embed_text(self, text):
-        return np.asarray(self._TEXT.get(text.lower().strip(),
-                                         [0.0, 0.0, 0.0]), np.float32)
 
 
 def _frame(basis: int) -> np.ndarray:
@@ -43,52 +34,11 @@ def _mem() -> FrameMemory:
     return FrameMemory(embedder=FakeEmbedder())
 
 
-def test_recall_returns_nearest_frame_with_jpeg_and_boxes():
-    mem = _mem()
-    mem.remember(_frame(0), [{"label": "apple", "box": [0, 0, 1, 1], "score": 0.9}])
-    mem.remember(_frame(1), [{"label": "leaf", "box": [0, 0, 1, 1], "score": 0.9}])
-    hits = mem.recall("red")
-    assert hits, "the red frame should be recalled"
-    assert hits[0]["detections"][0]["label"] == "apple"
-    assert hits[0]["score"] == pytest.approx(1.0, abs=1e-4)
-    assert hits[0]["jpeg_b64"]
-
-
-def test_recall_gate_drops_things_never_seen():
-    # "blue" is orthogonal to both stored frames (red, green) → cosine 0 →
-    # below RECALL_MIN_SCORE → nothing recalled (no hallucinated memory).
-    mem = _mem()
-    mem.remember(_frame(0), [{"label": "apple"}])
-    mem.remember(_frame(1), [{"label": "leaf"}])
-    assert mem.recall("blue") == []
-
-
-def test_recall_filters_by_yolo_labels():
-    # Two frames match the "red" query (same basis); the label filter keeps
-    # only the one whose YOLO metadata contains "cherry".
-    mem = _mem()
-    mem.remember(_frame(0), [{"label": "apple", "box": [0, 0, 1, 1], "score": 0.8}])
-    mem.remember(_frame(0), [{"label": "cherry", "box": [0, 0, 1, 1], "score": 0.8}])
-    hits = mem.recall("red", must_labels=["cherry"])
-    assert len(hits) == 1
-    assert hits[0]["labels"] == ["cherry"]
-
-
-def test_recall_empty_query_returns_empty():
-    mem = _mem()
-    mem.remember(_frame(0), [{"label": "apple"}])
-    assert mem.recall("   ") == []
-
-
-def test_recall_on_empty_memory_returns_empty():
-    assert _mem().recall("red") == []
-
-
 def test_remember_stores_labels_and_a_decodable_jpeg():
     mem = _mem()
     mem.remember(_frame(0), [{"label": "apple", "box": [0, 0, 1, 1], "score": 0.9},
                              {"label": "apple", "box": [0, 0, 1, 1], "score": 0.7}])
-    hit = mem.recall("red")[0]
+    hit = mem.day_frames()[0]
     # labels are de-duplicated metadata, not the vector
     assert hit["labels"] == ["apple"]
     img = base64.b64decode(hit["jpeg_b64"])
@@ -96,10 +46,10 @@ def test_remember_stores_labels_and_a_decodable_jpeg():
     assert Image.open(io.BytesIO(img)).format == "JPEG"
 
 
-def test_remember_without_detections_still_stores_a_recallable_frame():
+def test_remember_without_detections_still_stores_a_frame():
     mem = _mem()
     mem.remember(_frame(0))  # a frame with no YOLO boxes
-    hits = mem.recall("red")
+    hits = mem.day_frames()
     assert len(hits) == 1
     assert hits[0]["detections"] == []
     assert hits[0]["labels"] == []
@@ -210,9 +160,9 @@ def test_scene_writer_skips_when_no_frame():
 # thread layout: 800 expected points landed as 555, with sqlite3.InterfaceError
 # / IndexError from the writer and a numpy broadcast ValueError from the
 # reader. This test exercises the same layout (on-disk store, one thread only
-# writing, one alternating recall/remember) and fails without `_lock`. ---
+# writing, one alternating reads with remember) and fails without `_lock`. ---
 
-def test_concurrent_remember_and_recall_do_not_corrupt_the_store(tmp_path):
+def test_concurrent_remember_and_reads_do_not_corrupt_the_store(tmp_path):
     import threading
 
 
@@ -230,10 +180,10 @@ def test_concurrent_remember_and_recall_do_not_corrupt_the_store(tmp_path):
                 errors.append(exc)
 
     def voice_thread():
-        # Mirrors the voice thread: a search, then a stored look, per turn.
+        # Mirrors the voice thread: a read, then a stored look, per turn.
         for i in range(iterations):
             try:
-                mem.recall("red")
+                mem.day_frames()
                 mem.remember(_frame(i % 3), [{"label": f"voice{i}"}])
             except Exception as exc:  # noqa: BLE001 — this IS the race being tested
                 errors.append(exc)
@@ -245,7 +195,7 @@ def test_concurrent_remember_and_recall_do_not_corrupt_the_store(tmp_path):
     t1.join()
     t2.join()
 
-    assert errors == [], f"concurrent recall/remember raised: {errors!r}"
+    assert errors == [], f"concurrent reads/remember raised: {errors!r}"
     # Every remember() must have landed its own point — no id collisions
     # silently overwriting one frame's storage with another's.
     assert mem._store.count() == iterations * 2
@@ -421,8 +371,8 @@ class FakeWords:
 
 def test_a_stored_frame_carries_its_objects_and_its_people_and_is_found_by_them():
     """The objects and the names were always written into the point — and
-    for a long time nothing ever searched them: `must_labels` was never passed by
-    the demo, and the only text vector written was a look's caption (7 frames
+    for a long time nothing ever searched them: the old picture search's
+    label filter was never used by the demo, and the only text vector written was a look's caption (7 frames
     of the 371 on the robot). Stored is not indexed."""
     from emulator.frame_memory import SceneChangeWriter
 
@@ -451,6 +401,83 @@ def test_a_stored_frame_carries_its_objects_and_its_people_and_is_found_by_them(
     assert mem.recall_text("did you see a bottle?")[0]["labels"] == ["bottle", "person"]
     assert mem.recall_text("did you see Sasha?")[0]["names"] == ["Sasha"]
     assert mem.recall_text("was there a curtain?") == [], "the gate still holds"
+
+
+class FakeWordsThatSee(FakeWords):
+    """FakeWords with one more direction: seeing. Every frame's words say "I
+    saw", and so does every question about seeing — the shared verb the real
+    bge scores too (EMPTY_FRAME)."""
+
+    _BASIS = {"bottle": [1.0, 0.0, 0.0, 0.0], "sasha": [0.0, 1.0, 0.0, 0.0],
+              "curtain": [0.0, 0.0, 1.0, 0.0], "saw": [0.0, 0.0, 0.0, 1.0],
+              "see": [0.0, 0.0, 0.0, 1.0]}
+
+    def _one(self, text):
+        low = text.lower()
+        vector = np.zeros(4, np.float32)
+        for word, basis in self._BASIS.items():
+            if word in low:
+                vector += np.asarray(basis, np.float32)
+        norm = float(np.linalg.norm(vector))
+        return vector / norm if norm else vector
+
+
+def test_a_frame_whose_words_only_share_i_saw_with_the_question_is_no_match():
+    """"What did you see?" against "I saw bottle": cosine 0.707, over the
+    gate — on the verb alone. The empty frame, "I saw something", scores
+    1.0: no frame beats it, so nothing comes back. "Did you see a bottle?"
+    scores 1.0 on the bottle and 0.707 on the empty frame, so it does."""
+    from emulator.frame_memory import FRAME_TEXT_MIN_SCORE
+
+    mem = FrameMemory(embedder=FakeEmbedder(), text_embedder=FakeWordsThatSee())
+    mem.remember(_frame(0), [{"label": "bottle"}])
+    assert np.isclose(mem._empty_frame_score(FakeWordsThatSee()._one("what did you see?")), 1.0)
+    hit = mem._store.search([float(x) for x in FakeWordsThatSee()._one("what did you see?")],
+                            1, mem._frames(), using="text")[0]
+    assert hit["score"] >= FRAME_TEXT_MIN_SCORE, "over the gate on the verb alone"
+    assert mem.recall_text("what did you see?") == []
+    assert mem.recall_text("did you see a bottle?")[0]["labels"] == ["bottle"]
+
+
+def _bge_cached() -> bool:
+    try:
+        from fastembed import TextEmbedding
+
+        TextEmbedding("BAAI/bge-small-en-v1.5", local_files_only=True, lazy_load=True)
+        return True
+    except Exception:  # noqa: BLE001 — not cached, or fastembed missing
+        return False
+
+
+@pytest.mark.skipif(not _bge_cached(), reason="bge-small is not cached")
+def test_with_the_real_bge_a_question_that_names_nothing_finds_no_frame():
+    """The measurement EMPTY_FRAME rests on, on real bge: frames written the
+    way the robot writes them. Without the empty frame, "What did you see?"
+    scored 0.704 on "I saw person" and "Did you see a cup?" 0.676 on "I saw
+    plant" — both over the 0.66 gate."""
+    from emulator.memory import _embedder
+
+    mem = FrameMemory(embedder=FakeEmbedder(),
+                      text_embedder=_embedder("BAAI/bge-small-en-v1.5"))
+    for i, (labels, meta) in enumerate((
+            (["person"], {}), (["plant"], {}), (["person", "plant"], {}),
+            (["person"], {"people": [{"name": "Sasha"}]}),
+            (["chair", "laptop"], {}), (["window"], {"looked": "left"}))):
+        mem.remember(_frame(i % 3), [{"label": label} for label in labels], meta=meta)
+    for question in ("What did you see today?", "Okay, so what did you see?",
+                     "What did you see?", "Nice, what did you see today?",
+                     "What did you see before?", "Did you see a cup?",
+                     "Did you see a dog?", "What did you notice this morning?",
+                     "Anything interesting you saw?", "What did you see before lunch?",
+                     "Have you seen my keys?",
+                     # and the questions that are not about seeing at all,
+                     # which `anything` sends here too
+                     "How do you work?", "how does your memory work",
+                     "Tell me about the universe.", "What did we talk about?"):
+        assert mem.recall_text(question) == [], question
+    assert "plant" in mem.recall_text("Did you see a plant?")[0]["labels"]
+    assert mem.recall_text("Did you see Sasha?")[0]["names"] == ["Sasha"]
+    assert "laptop" in mem.recall_text("Was there a laptop on the desk?")[0]["labels"]
 
 
 def test_a_look_is_stored_with_its_side_and_re_embedded_when_described():

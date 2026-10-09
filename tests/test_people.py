@@ -3,7 +3,7 @@ one it has not seen before."""
 import pytest
 
 from demo.people import (ASK_NAME, GREET_KNOWN, GREET_NEW, NOT_CAUGHT, People,
-                         Seen, name_from_answer)
+                         Seen)
 from emulator.face_memory import Match as _Match   # the real one
 
 
@@ -40,10 +40,16 @@ class _Reader:
 FRAME = object()
 
 
+def _model(heard):
+    """The model on the laptop reading the name (demo/serve.py's /name), for
+    the answers these tests give: the name said, or None."""
+    return {"Sorry, what?": None, "I'm Sasha.": "Sasha"}.get(heard, heard)
+
+
 # — recognising —
 
 def test_a_known_face_is_named_and_greeted_once():
-    people = People(_Memory(_Match("Sasha", 0.72)), _Reader())
+    people = People(_Memory(_Match("Sasha", 0.72)), _Reader(), read_name=_model)
     seen = people.observe(FRAME)
     assert seen.known and seen.name == "Sasha" and seen.box == [0.3, 0.2, 0.6, 0.7]
     assert people.greeting() == GREET_KNOWN.format(name="Sasha")
@@ -54,7 +60,7 @@ def test_a_known_face_is_named_and_greeted_once():
 
 def test_a_stranger_is_not_named_and_is_asked_who_they_are():
     memory = _Memory(_Match(None, 0.05))
-    people = People(memory, _Reader())
+    people = People(memory, _Reader(), read_name=_model)
     seen = people.observe(FRAME)
     assert not seen.known and seen.box is not None
     assert people.greeting() is None
@@ -66,7 +72,7 @@ def test_a_stranger_is_not_named_and_is_asked_who_they_are():
 
 def test_meeting_someone_stores_several_shots_under_their_name():
     memory = _Memory(_Match(None, 0.05))
-    people = People(memory, _Reader(), shots=3)
+    people = People(memory, _Reader(), shots=3, read_name=_model)
     for _ in range(5):
         people.observe(FRAME)          # more turns than shots wanted
     people.ask_name()
@@ -83,7 +89,7 @@ def test_meeting_someone_stores_several_shots_under_their_name():
 def test_a_name_that_was_not_understood_is_not_enrolled():
     # A wrong name attached to a face outlives the mistake.
     memory = _Memory(_Match(None, 0.05))
-    people = People(memory, _Reader())
+    people = People(memory, _Reader(), read_name=_model)
     people.observe(FRAME)
     people.ask_name()
     name, line = people.answer_name("Sorry, what?")
@@ -95,21 +101,21 @@ def test_a_name_that_was_not_understood_is_not_enrolled():
 def test_a_borderline_match_is_neither_greeted_nor_enrolled():
     # Between the thresholds: too close to call.
     memory = _Memory(_Match("Sasha", 0.30))
-    people = People(memory, _Reader())
+    people = People(memory, _Reader(), read_name=_model)
     people.observe(FRAME)
     assert people.greeting() is None
     assert not people.should_ask_name(), "no shots collected for an unsure face"
 
 
 def test_a_frame_with_no_face_keeps_the_box_but_names_nobody():
-    people = People(_Memory(), _Reader(faces=[]))
+    people = People(_Memory(), _Reader(faces=[]), read_name=_model)
     seen = people.observe(FRAME)
     assert seen == Seen(None, 0.0, None)
     assert not people.should_ask_name()
 
 
 def test_a_face_service_that_fails_does_not_break_the_turn(capsys):
-    people = People(_Memory(), _Reader(fails=True))
+    people = People(_Memory(), _Reader(fails=True), read_name=_model)
     assert people.observe(FRAME) == Seen(None, 0.0, None)
     assert "[faces] skip" in capsys.readouterr().out
 
@@ -121,29 +127,12 @@ def test_without_a_memory_or_a_reader_nothing_happens():
     assert people.greeting() is None and not people.should_ask_name()
 
 
-# — the name in an answer —
-
-@pytest.mark.parametrize("heard,name", [
-    ("Sasha", "Sasha"), ("Sasha.", "Sasha"), ("I'm Sasha", "Sasha"),
-    ("My name is Anna.", "Anna"), ("call me Bob", "Bob"), ("It is Anna", "Anna"),
-])
-def test_a_name_is_taken_from_the_answer(heard, name):
-    assert name_from_answer(heard) == name
-
-
-@pytest.mark.parametrize("heard", [
-    "", "Sorry, what?", "Thanks for asking", "Hey there",
-    "I am not sure I want to say",
-])
-def test_an_answer_without_a_name_gives_none(heard):
-    assert name_from_answer(heard) is None
-
-
 # — the same person, still in front of the robot —
 
 def _clocked(memory, shots=5):
     now = [0.0]
-    return People(memory, _Reader(), shots=shots, clock=lambda: now[0]), now
+    return People(memory, _Reader(), shots=shots, clock=lambda: now[0],
+                  read_name=_model), now
 
 
 def test_someone_just_met_is_not_asked_again_while_they_stay_in_view():
@@ -303,7 +292,7 @@ def test_a_person_who_left_before_the_head_turned_stays_gone():
 
 
 def test_a_turn_with_no_picture_is_not_another_arrival():
-    people = People(_Memory(_Match(None, 0.05)), _Reader())
+    people = People(_Memory(_Match(None, 0.05)), _Reader(), read_name=_model)
     assert people.observe(FRAME).stranger_arrived
     assert not people.observe(None).stranger_arrived
     people._reader = _Reader(fails=True)
@@ -401,7 +390,7 @@ def test_in_frame_names_known_faces_and_leaves_strangers_unnamed():
         def people(self):
             return ["Sasha"]
 
-    people = People(_ByVector(), _Two())
+    people = People(_ByVector(), _Two(), read_name=_model)
     found = people.in_frame(FRAME)
     assert [p["name"] for p in found] == ["Sasha", None]
     assert people.met() == ["Sasha"]
@@ -506,7 +495,7 @@ def test_the_same_person_at_a_bad_angle_keeps_their_name():
     assert people.observe(FRAME).name == "Sasha"
 
 
-def test_the_name_is_read_by_the_model_with_the_pattern_as_a_fallback():
+def test_the_name_is_read_by_the_model():
     memory = _Memory(_Match(None, 0.05))
     people = People(memory, _Reader(), read_name=lambda heard: "Robin")
     people.observe(FRAME)
@@ -514,27 +503,21 @@ def test_the_name_is_read_by_the_model_with_the_pattern_as_a_fallback():
     name, line = people.answer_name("they call me Robin")
     assert name == "Robin" and memory.enrolled[-1][0] == "Robin"
 
-    def broken(heard):
-        raise OSError("the Mac is not answering")
-
-    people = People(_Memory(_Match(None, 0.05)), _Reader(), read_name=broken)
-    people.observe(FRAME)
-    people.ask_name()
-    assert people.answer_name("I'm Sasha.")[0] == "Sasha", "the pattern still reads it"
-
 
 def test_the_models_no_name_is_an_answer_not_a_reason_to_guess():
-    # The model read "What's yours?" as no name; the pattern would take
-    # "What's" for one. The pattern is for when the model cannot be asked.
+    # The model read "What's yours?" as no name; a pattern over the words
+    # took "What's" for one.
     memory = _Memory(_Match(None, 0.05))
     people = People(memory, _Reader(), read_name=lambda heard: None)
     people.observe(FRAME)
     people.ask_name()
-    assert people.answer_name("I'm Sasha, what's yours?") == (None, NOT_CAUGHT)
+    assert people.answer_name("What's yours?") == (None, NOT_CAUGHT)
     assert memory.enrolled == []
 
 
-def test_the_pattern_reads_the_name_when_the_model_cannot_be_asked():
+def test_a_name_the_model_cannot_be_asked_about_is_not_caught():
+    # No pattern over the words stands in for the model: nobody is enrolled
+    # under a guess, and the robot asks again after its next answer.
     def unreachable(heard):
         raise OSError("laptop gone")
 
@@ -542,8 +525,22 @@ def test_the_pattern_reads_the_name_when_the_model_cannot_be_asked():
     people = People(memory, _Reader(), read_name=unreachable)
     people.observe(FRAME)
     people.ask_name()
-    name, _line = people.answer_name("I'm Sasha.")
-    assert name == "Sasha"
+    assert people.answer_name("I'm Sasha.") == (None, NOT_CAUGHT)
+    assert memory.enrolled == []
+    assert people.should_ask_name()
+
+
+def test_a_bug_in_the_name_reader_is_not_taken_for_a_name_not_caught():
+    # Only the laptop not answering is "not caught"; a bug reaches the turn's
+    # handler with its traceback instead of hiding behind the same line.
+    def broken(heard):
+        raise TypeError("a bug")
+
+    people = People(_Memory(_Match(None, 0.05)), _Reader(), read_name=broken)
+    people.observe(FRAME)
+    people.ask_name()
+    with pytest.raises(TypeError):
+        people.answer_name("Sasha")
 
 
 def test_a_pose_is_learned_under_the_name_it_was_judged_by():

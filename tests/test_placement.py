@@ -147,6 +147,38 @@ def test_faces_on_the_robot_are_read_the_way_the_laptops_are(monkeypatch, tmp_pa
     people.close()
 
 
+def test_the_name_is_read_by_the_laptops_model(monkeypatch, tmp_path):
+    # The only way a name is read now: nothing falls back to a pattern, so a
+    # People built without the reader would enroll nobody, ever.
+    import numpy as np
+
+    from demo import run_demo
+    from demo.contract import NAME_PATH
+    from emulator import face as face_module
+
+    class OneFace:
+        def __init__(self, *args, **kwargs):
+            pass
+
+        def read(self, frame, *, embed=True):
+            return [face_module.Face(box=[0.4, 0.3, 0.6, 0.7], score=0.9,
+                                     embedding=[1.0] + [0.0] * 511 if embed else None)]
+
+    asked = []
+    monkeypatch.setattr(face_module, "FaceReader", OneFace)
+    monkeypatch.setattr(run_demo, "_http_post",
+                        lambda endpoint, payload: asked.append((endpoint, payload))
+                        or {"name": "Robin"})
+    people = run_demo.build_people(args(on_robot="faces", memory_dir=str(tmp_path),
+                                        brain="127.0.0.1", port=9500))
+    people.observe(np.zeros((8, 8, 3), np.uint8))
+    people.ask_name()
+    assert people.answer_name("they call me Robin")[0] == "Robin"
+    assert asked == [("http://127.0.0.1:9500" + NAME_PATH,
+                      {"text": "they call me Robin"})]
+    people.close()
+
+
 def test_faces_the_laptop_does_not_have_are_off_on_the_robot_too(monkeypatch, tmp_path, capsys):
     # The embed service says so in its health; asking it every frame instead
     # would only collect 503s.

@@ -22,7 +22,6 @@ dependencies = [
     "fastembed",
     # SigLIP 2 frame embeddings, torch-free on onnxruntime (emulator/frame_memory.py).
     "onnxruntime>=1.20",
-    "tokenizers>=0.20",
     # Speech recognition on the laptop (emulator/whisper_asr.py).
     "faster-whisper>=1.2.1",
     # Faces: OpenCV's YuNet detector (emulator/face.py).

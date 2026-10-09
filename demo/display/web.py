@@ -120,9 +120,10 @@ class WebDashboard:
         self._broadcast(sse("detections", {"boxes": detections}))
 
     def on_recall(self, hits: list[dict]) -> None:
-        """Show the frames a query recalled. `hits` come straight from
-        FrameMemory.recall (emulator/frame_memory.py): each carries the stored
-        `jpeg_b64` and the frame's YOLO `detections` (drawn as boxes).
+        """Show the frames a query recalled. `hits` are stored frames
+        (emulator/frame_memory.py's recall_text, day_frames or a look): each
+        carries the stored `jpeg_b64` and the frame's YOLO `detections`
+        (drawn as boxes).
 
         ALWAYS broadcasts, even with zero frames: this used to skip the event
         on an empty result so the panel "kept its last state rather than

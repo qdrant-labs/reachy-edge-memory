@@ -15,6 +15,7 @@ Models, fetched from Hugging Face at run time
   network, the AGPL applies to that.
 - Moonshine Tiny, Useful Sensors (litert-community/moonshine-tiny,
   UsefulSensors/moonshine-tiny) — MIT
+- Silero VAD, Silero Team (onnx-community/silero-vad) — MIT
 - Inflect-Nano-v2 (litert-community/Inflect-Nano-v2, from
   owensong/Inflect-Nano-v2) — Apache-2.0
 - YuNet face detector, Shiqi Yu (opencv/face_detection_yunet) — MIT

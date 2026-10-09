@@ -254,13 +254,17 @@ def _fake_transcribe(heard: str, endpoints_seen: list[str] | None = None):
 
 class _FakeFrameMemory:
     """Stand-in for emulator.frame_memory.FrameMemory — records the query and
-    returns canned hits, without SigLIP/onnx. `calls` records recall/remember
-    in the order they actually happened, for the recall-before-store tests."""
+    returns canned frames, without SigLIP/onnx. `hits` answer the frames'
+    words search and `day` is the day's frames, each filtered by `before` as
+    the real ones are, so a test sees whether the turn's start reached them.
+    There is no picture search: nothing in the turn may ask for one. `calls`
+    records recall/remember in the order they actually happened, for the
+    recall-before-store tests."""
 
-    def __init__(self, hits):
+    def __init__(self, hits, day=()):
         self._hits = hits
+        self._day = list(day)
         self.queries: list[str] = []
-        self.min_scores: list = []
         self.remembered: list[tuple] = []
         self.calls: list[str] = []
 
@@ -278,19 +282,14 @@ class _FakeFrameMemory:
         return []
 
     def recall_text(self, query, k=3, before=None):
-        # The words search answers nothing here: these tests are about the
-        # picture search and the turn's own filtering around it.
-        return []
-
-    def recall(self, query, k=4, must_labels=None, min_score=None):
-        # min_score is recorded, not applied: the real FrameMemory filters on
-        # it, and _handle_stream passes 0.0 so the LLM is handed the best
-        # frame whatever it scored — no threshold separates a recall question
-        # from a command (see the call site). Tests assert what was asked for.
         self.calls.append("recall")
         self.queries.append(query)
-        self.min_scores.append(min_score)
-        return self._hits
+        return [hit for hit in self._hits
+                if before is None or hit.get("ts", 0.0) < before]
+
+    def day_frames(self, before=None):
+        return [frame for frame in self._day
+                if before is None or frame.get("ts", 0.0) < before]
 
 
 
@@ -1284,21 +1283,23 @@ def test_handle_stream_does_not_search_memory_unless_the_model_asks(monkeypatch)
 
 
 def test_handle_stream_shows_visual_recall_when_the_model_calls_recall_seen(monkeypatch):
+    # The tool's older name is still answered, as a question about what was
+    # seen: the frame whose words hold it goes to the model and the screen.
     hits = [{"jpeg_b64": _b64(b"MUG"),
              "detections": [{"label": "cup", "box": [0, 0, 1, 1], "score": 0.8}],
-             "score": 0.13}]
+             "score": 0.78}]
     fm, seen = _FakeFrameMemory(hits), []
-    display = _turn(monkeypatch, "what did you see that's red?",
-                    _tool("recall_seen", query="something red"), _said("A red mug."),
+    display = _turn(monkeypatch, "did you see a red mug?",
+                    _tool("recall_seen", query="a red mug"), _said("A red mug."),
                     seen=seen, frame_memory=fm)
-    assert fm.queries == ["something red"]
+    assert fm.queries == ["a red mug"]
     assert display.recalls == [[], [{**hits[0], "weak": False}]]
     # The call is shown and run exactly as the model made it: nothing is
     # added to it from the words of the question.
-    assert display.tool_calls == [("recall_seen", {"query": "something red"})]
+    assert display.tool_calls == [("recall_seen", {"query": "a red mug"})]
     # the recalled frame goes to the model with the follow-up request
     assert seen[1][1].image_jpeg == b"MUG"
-    assert seen[1][1].text == "what did you see that's red?"
+    assert seen[1][1].text == "did you see a red mug?"
 
 
 def test_handle_stream_look_shows_the_model_this_turns_frame(monkeypatch):
@@ -1317,7 +1318,7 @@ def test_a_turn_searches_what_was_seen_but_does_not_store_its_own_frame(monkeypa
     this_turn_frame = np.zeros((2, 2, 3), dtype=np.uint8)
     dets = [{"label": "cup", "score": 0.9, "box": [0, 0, 1, 1]}]
     fm = _FakeFrameMemory([{"jpeg_b64": _b64(b"old"), "detections": [], "score": 0.2}])
-    _turn(monkeypatch, "what did you see?", _tool("recall_seen", query="seen"),
+    _turn(monkeypatch, "what did you see?", _tool("remember", query="seen", about="seen"),
           _said("A cup."), frame_memory=fm, frame=this_turn_frame, detections=dets)
     assert fm.calls == ["recall"]
     assert fm.remembered == []
@@ -1359,11 +1360,12 @@ def test_a_dropped_brain_does_not_break_the_turn(monkeypatch):
 # detect thread and can beat it — frames it wrote during this very turn are
 # the present, and the recall tool must drop them (demo/conversation.py). ---
 
-def _recall_frames(monkeypatch, hits, **kwargs):
-    display = _turn(monkeypatch, "what did you see?", _tool("recall_seen", query="seen"),
-                    _said("ok"), frame_memory=_FakeFrameMemory(hits), **kwargs)
-    # `weak` is how the projector dims an unconfident match; these tests are
-    # about WHICH frames come back, so compare without it.
+def _recall_frames(monkeypatch, hits, day=(), **kwargs):
+    display = _turn(monkeypatch, "did you see the bottle?",
+                    _tool("remember", query="the bottle", about="seen"),
+                    _said("ok"), frame_memory=_FakeFrameMemory(hits, day), **kwargs)
+    # `weak` is the projector's flag for a dimmed match (never set now that
+    # nothing guesses); these tests are about WHICH frames come back.
     return [{key: value for key, value in frame.items() if key != "weak"}
             for frame in display.recalls[-1]]
 
@@ -1374,6 +1376,17 @@ def test_handle_stream_excludes_frame_memory_hits_stored_during_this_turn(monkey
                       "ts": 100.5}
     assert _recall_frames(monkeypatch, [concurrent_hit, past_hit],
                           turn_started_at=100.0) == [past_hit]
+
+
+
+def test_the_days_frames_leave_out_the_frame_stored_during_this_turn(monkeypatch):
+    # The day starts from its newest frame: without the turn's start, the
+    # frame the scene writer stored while the question was being asked would
+    # be on the screen as a memory every time.
+    past = {"jpeg_b64": _b64(b"OLD"), "detections": [], "score": 0.0, "ts": 50.0}
+    concurrent = {"jpeg_b64": _b64(b"NEW"), "detections": [], "score": 0.0, "ts": 100.5}
+    assert _recall_frames(monkeypatch, [], day=[concurrent, past],
+                          turn_started_at=100.0) == [past]
 
 
 def test_handle_stream_keeps_frame_memory_hits_when_turn_started_at_is_none(monkeypatch):
@@ -1456,24 +1469,26 @@ def test_handle_stream_moves_old_exchanges_into_speech_memory_over_budget(monkey
     window.add("I'm giving a talk.", "Exciting!")
     display = _turn(monkeypatch, "Can you nod?", _said("Sure!", token_count=400),
                     conversation=window)
-    # The window learned the name from "I'm Sasha" and relabelled what it
-    # had not stored yet (demo/conversation.py's speaker_name).
-    assert sm.remembered == [("exchange", "Sasha: Hi, I'm Sasha. — Reachy: Hello Sasha!")]
-    assert display.memory_writes == [["Sasha: Hi, I'm Sasha. — Reachy: Hello Sasha!"]]
+    assert sm.remembered == [("exchange", "Person: Hi, I'm Sasha. — Reachy: Hello Sasha!")]
+    assert display.memory_writes == [["Person: Hi, I'm Sasha. — Reachy: Hello Sasha!"]]
     assert window.history == [("I'm giving a talk.", "Exciting!"), ("Can you nod?", "Sure!")]
 
 
-@pytest.mark.parametrize("heard", ["You", "you.", "Thanks for watching!", "♪♪", " ♪ "])
-def test_handle_stream_ignores_what_the_recogniser_makes_of_noise(monkeypatch, heard):
+@pytest.mark.parametrize("heard", ["♪♪", " ♪ ", "..."])
+def test_handle_stream_ignores_a_transcript_with_no_words(monkeypatch, heard):
     display = _turn(monkeypatch, heard)  # _no_generate_http_stream: no chat call
     assert display.heard == [""]
 
 
-@pytest.mark.parametrize("heard", ["Thank you.", "You look happy!", "", "What do you see?"])
-def test_real_speech_is_not_mistaken_for_noise(heard):
-    from demo.run_demo import _is_asr_noise
+@pytest.mark.parametrize("heard", ["You", "Thanks for watching!", "Thank you.", "42.",
+                                   "You look happy!", "", "What do you see?"])
+def test_words_are_never_judged_to_be_noise_by_what_they_say(heard):
+    # Noise is turned away before it is a transcript, by what the recognisers
+    # can tell about the audio (emulator/speech_detector.py, whisper_asr.py's
+    # NO_SPEECH_MAX); no list of words decides it here.
+    from demo.run_demo import _holds_no_words
 
-    assert not _is_asr_noise(heard)
+    assert not _holds_no_words(heard)
 
 
 def test_parse_args_context_budget_default_and_override():

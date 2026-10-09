@@ -113,9 +113,9 @@ DAY_SYSTEM = (
 # tools — said, seen, taught — made the model pick a store by the topic of the
 # question: "What did I tell you about Qdrant?" went to the facts 6 times in 6,
 # and the robot had to correct it in code. With one tool the model only says
-# what it is looking for, and the search itself decides which store answers:
-# words beat pictures, a picture comes back only when nothing was said about
-# it. Measured over 36 fresh chats: 33 right, against 14/18 for the memory
+# what it is looking for and which half of the past (`about`, below), and the
+# search decides what answers: words beat pictures, a picture comes back only
+# when nothing was said about it. Measured over 36 fresh chats: 33 right, against 14/18 for the memory
 # questions with three.
 #
 # The NAME does nothing, measured (32 questions over
@@ -138,20 +138,21 @@ DAY_SYSTEM = (
 # A fourth value, `me`, for the questions that are about the person asking:
 # "do you remember me?", "have we met?", "what's my name?". Measured over 26
 # questions and two histories: `me` 10/10, and every
-# miss elsewhere was `anything`, which reads as "answer from both halves" —
-# what the robot did before the argument existed. Without it those questions
+# miss elsewhere was `anything`, which searches the words of both halves —
+# never the day's pictures (demo/conversation.py's _answer_tool). Without it those questions
 # fell into the day-reading case and the robot described its afternoon;
 # "did you see me today?" came back "I do not have any memory of seeing you
 # today" while the person stood in front of it.
 #
-# `about` exists for one case: a question that names nothing to search for.
-# "What did you see today?" and "What did we talk about today?" have no
-# subject — no vector can tell them apart, and the robot used to answer both
-# with everything it had, frames and conversation together. The model says
-# which half it means; measured over 20 questions and two histories, it fills
-# it right 18 times, and both misses were
-# "anything", which reads exactly as it did before the argument existed. It
-# is ignored for a question that DOES name something: there the scores decide.
+# `about` says which half of the past is searched; the scores decide what in
+# it answers. "What did you see today?" and "What did we talk about today?"
+# name nothing — no vector can tell them apart, and the robot used to answer
+# both with everything it had, frames and conversation together. The model
+# says which half it means; measured over 20 questions and two histories, it
+# fills it right 18 times, and both misses were "anything". That is the words
+# of both halves and never the day, so a question about what was seen that
+# names nothing and comes as `anything` is answered from the conversation —
+# 2 of 29 such questions, measured (demo/conversation.py's _answer_tool).
 #
 # The description names the tense, then spells out the questions (measured
 # over 26 fresh chats, with an empty and a three-turn history).

@@ -52,7 +52,7 @@ robot.
 - macOS on Apple silicon, Python 3.12, [uv](https://docs.astral.sh/uv/) and
   `ffmpeg` (`brew install ffmpeg`) — the laptop's camera, microphone and speaker
   go through ffmpeg and afplay.
-- About 6 GB of disk for the models, downloaded from Hugging Face on first use.
+- About 5 GB of disk for the models, downloaded from Hugging Face on first use.
 - For the robot: a Reachy Mini (the Wireless one, with the CM4 inside), SSH
   access to it as `pollen` with a key, and the robot and the laptop on the same
   network. No robot? The simulator below stands in for it.
@@ -63,7 +63,7 @@ uv sync
 uv run python -m emulator.models      # download every model up front
 ```
 
-Download them up front: otherwise the first start fetches about 5 GB — Gemma 4
+Download them up front: otherwise the first start fetches about 4 GB — Gemma 4
 E2B, SigLIP 2 and Whisper — while `stage` waits four minutes for the models to
 come up, and on a slower connection it gives up first. The face embedder,
 HSFace, has no ready-made LiteRT build: this step builds it from its PyTorch
@@ -173,8 +173,8 @@ Each kind of question is answered from a different place:
 | "Nod", "Show me you're happy" | nothing: the robot moves |
 
 A face that is clearly nobody it has met is asked its name once the robot has
-answered what was said; the next thing said is taken as the name, and the face
-is stored under it in `people`. A name it cannot make out is not stored, and it
+answered what was said; the language model reads the name out of the next
+thing said, and the face is stored under it in `people`. A name it cannot make out is not stored, and it
 asks again on a later turn. This needs the face models.
 
 With `--sim` the camera is the laptop's: it does not move with the simulated

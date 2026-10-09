@@ -13,9 +13,11 @@ def build_recognizer(kind: str, model: str | None = None):
     text."""
     if kind == "moonshine":
         from emulator.asr import MoonshineTokenizer, Recognizer
+        from emulator.speech_detector import SpeechDetector
 
         return Recognizer(models.fetch(models.ASR),
-                          MoonshineTokenizer(models.fetch("moonshine-tokenizer")))
+                          MoonshineTokenizer(models.fetch("moonshine-tokenizer")),
+                          speech=SpeechDetector(models.fetch("silero-vad")))
     if kind == "whisper":
         from emulator.whisper_asr import DEFAULT_MODEL, WhisperRecognizer
 

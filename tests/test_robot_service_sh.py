@@ -251,7 +251,7 @@ def test_each_family_brings_what_it_calls():
 def test_only_the_named_families_models_are_carried():
     block = _prepare_block()
     for family, model in (("detector", "yolo26n"), ("faces", "yunet"),
-                          ("asr", "moonshine-tokenizer"),
+                          ("asr", "moonshine-tokenizer"), ("asr", "silero-vad"),
                           ("tts", "inflect-nano-v2")):
         case = block.index(f"*,{family},*")
         assert model in block[case:case + 700], f"{family} must bring {model}"

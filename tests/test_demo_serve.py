@@ -320,12 +320,14 @@ def test_warm_up_exercises_the_slow_first_calls():
 
     class Rec:
         def transcribe(self, pcm):
-            seen["heard"] = True
+            seen["heard"] = pcm
             return ""
 
     warm_up(Models(recognizer=Rec(), synthesizer=Synth(), llm=Llm()))
     assert seen["images"] and seen["images"][0], "warmup must include an image"
-    assert seen["spoke"] and seen["heard"]
+    # The voice's own words, not silence: a speech detector in front of the
+    # recognizer would keep silence from the model and leave it cold.
+    assert seen["spoke"] and np.abs(seen["heard"]).max() > 0
 
 
 def test_warm_up_survives_a_broken_component():

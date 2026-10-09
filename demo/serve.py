@@ -112,8 +112,10 @@ def handle_name(payload: dict, stack: Models) -> dict:
                    in stack.llm.reply_stream(heard.strip(), system=NAME_SYSTEM)
                    if event.get("type") == "content")
     name = said.strip().strip(".!?,\"'").strip()
-    if (not name or len(name) > NAME_MAX_CHARS or " " in name
-            or name.upper() == "NONE"):
+    if not name or name.upper() == "NONE":
+        return {"name": None}
+    if len(name) > NAME_MAX_CHARS or " " in name:
+        print(f"  [name] not a name: {said!r}")
         return {"name": None}
     return {"name": name[:1].upper() + name[1:]}
 
@@ -387,15 +389,33 @@ def warm_up(stack: Models, chat_session: ChatSession | None = None) -> None:
             print(f"    chat warmup skipped ({type(exc).__name__}: {exc})")
         finally:
             chat_session.reset()
+    spoken = None
     try:
-        stack.synthesizer.speak("Ready.")
+        spoken = stack.synthesizer.speak("Ready.")
     except Exception as exc:  # noqa: BLE001
         print(f"    tts warmup skipped ({type(exc).__name__}: {exc})")
     try:
-        stack.recognizer.transcribe(np.zeros(16000, dtype=np.float32))
+        # The voice's own "Ready.", not silence: moonshine sits behind a
+        # speech detector (emulator/speech_detector.py), which would keep
+        # silence from the model and leave it cold.
+        stack.recognizer.transcribe(_at_16k(
+            spoken, getattr(stack.synthesizer, "sample_rate", 16000)))
     except Exception as exc:  # noqa: BLE001
         print(f"    asr warmup skipped ({type(exc).__name__}: {exc})")
     print(f"  warm in {time.perf_counter() - t0:.1f}s", flush=True)
+
+
+def _at_16k(audio, rate: int) -> np.ndarray:
+    """`audio` resampled to the recognizers' 16 kHz — a second of silence
+    when there is none."""
+    if audio is None or not len(audio):
+        return np.zeros(16000, dtype=np.float32)
+    audio = np.asarray(audio, dtype=np.float32).reshape(-1)
+    if rate == 16000:
+        return audio
+    count = int(len(audio) * 16000 / rate)
+    return np.interp(np.linspace(0, len(audio) - 1, count),
+                     np.arange(len(audio)), audio).astype(np.float32)
 
 
 def _blank_jpeg(size: int = 64) -> bytes:

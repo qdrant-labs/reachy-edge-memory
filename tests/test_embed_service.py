@@ -159,3 +159,28 @@ def test_faces_off_is_answered_503_with_why_and_said_in_health(monkeypatch, capl
     finally:
         server.shutdown()
         server.server_close()
+
+
+def test_warm_pays_both_load_costs_and_survives_faces_off():
+    # SigLIP is warmed through its picture side, the only one there is now.
+    import numpy as np
+
+    from demo.embed_service import Embedders
+
+    called = []
+
+    class Pictures:
+        def embed_image(self, frame):
+            called.append(("image", np.asarray(frame).shape))
+            return np.zeros(3, np.float32)
+
+    class Words:
+        def embed(self, texts):
+            called.append(("words", list(texts)))
+            return iter([np.zeros(3, np.float32)])
+
+    embedders = Embedders()
+    embedders._siglip, embedders._bge = Pictures(), Words()
+    embedders.faces_off = "no face models here"
+    embedders.warm()
+    assert called == [("image", (64, 64, 3)), ("words", ["warm"])]

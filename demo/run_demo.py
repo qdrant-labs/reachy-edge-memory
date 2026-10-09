@@ -423,16 +423,15 @@ def _say(text, endpoint, robot, display, *, make_player=None, robot_guard=None,
     return True
 
 
-# What the speech recogniser makes of room noise and near-silence, seen live
-# on the robot ("You", "Thanks for watching!", "♪♪"). A turn built on one of
-# them answers a question nobody asked — and, now that the conversation is
-# kept, would sit in the model's context as if it had been said.
-_ASR_NOISE = frozenset({"you", "thanks for watching"})
-
-
-def _is_asr_noise(heard: str) -> bool:
-    words = re.sub(r"[^a-z' ]+", " ", heard.lower()).split()
-    return bool(heard.strip()) and (not words or " ".join(words) in _ASR_NOISE)
+# A transcript with no letter or digit in it ("♪♪", what a recogniser writes
+# for music) is nothing anyone said. A turn built on one answers a question nobody asked
+# — and, with the conversation kept, would sit in the model's context as if
+# it had been said. Noise itself is turned away before it is a transcript, by
+# what the recognisers can tell about the audio (a speech detector in front
+# of either, Whisper's own no-speech estimate), not by a list of what it
+# tends to come out as: "You", "Thanks for watching!".
+def _holds_no_words(heard: str) -> bool:
+    return bool(heard.strip()) and not re.search(r"[A-Za-z0-9]", heard)
 
 
 def _handle_stream(detections, audio, endpoint, robot, display,
@@ -479,8 +478,8 @@ def _handle_stream(detections, audio, endpoint, robot, display,
         display.on_recall([])
         display.on_speech_recall([])
         return
-    if _is_asr_noise(heard):
-        print(f"  [asr] ignoring {heard!r} — noise, not speech")
+    if _holds_no_words(heard):
+        print(f"  [asr] ignoring {heard!r} — no words in it")
         heard = ""
     display.on_heard(heard)
     # Who is in front of the robot: one face lookup for this turn, before the
@@ -711,8 +710,10 @@ class Looker:
 
     def caption(self, reply: str | None) -> None:
         """What the robot said about the picture it just took, kept with it —
-        "what did you see?" is answered from these (demo/conversation.py's
-        recall_seen)."""
+        part of the frame's words (emulator/frame_memory.py's frame_text), so
+        a question about what was there finds the look and it is read out
+        (demo/conversation.py's LOOKS_NOTE). "What did you see?" is answered
+        from the day's pictures instead (day_frames)."""
         stored, self._stored = self._stored, None
         if stored is None or not reply or self._frame_memory is None:
             return
@@ -812,9 +813,9 @@ def _talk(heard, detections, endpoint, robot, display, conversation, *,
             recall_fn=(lambda query: recall(
                 query, window=conversation, speech_memory=speech_memory))
             if speech_memory is not None else None,
-            recall_seen_fn=(lambda query, direction=None, pictures=True: recall_seen(
+            recall_seen_fn=(lambda query, direction=None: recall_seen(
                 query, frame_memory=frame_memory, turn_started_at=turn_started_at,
-                direction=direction, pictures=pictures))
+                direction=direction))
             if frame_memory is not None else None,
             look_fn=looker.look if looker is not None else None,
             look_names_fn=(lambda: list(looker.names)) if looker is not None else None,
@@ -907,7 +908,8 @@ def build_transcriber(args):
     try:
         recognizer = build_recognizer("moonshine")
     except Exception as exc:  # noqa: BLE001 — named and re-raised below
-        raise placement.missing("asr", "moonshine-tiny and its tokenizer",
+        raise placement.missing("asr", "moonshine-tiny, its tokenizer and the "
+                                "Silero speech detector",
                                 f"{type(exc).__name__}: {exc}") from exc
     return lambda audio, sample_rate: recognizer.transcribe(audio)
 
@@ -1188,7 +1190,7 @@ def build_people(args):
 def _read_name(endpoint: str, heard: str) -> str | None:
     """Ask the model on the laptop what name was just said (demo/serve.py's
     /name): the name, or None when the answer holds none. A failure raises,
-    and demo/people.py falls back to its pattern — only then."""
+    and demo/people.py takes it as a name it did not catch."""
     return _http_post(endpoint, {"text": heard}).get("name")
 
 
@@ -1715,7 +1717,8 @@ def parse_args(argv=None):
                    help="the knowledge snapshot restored at start "
                         "(default: demo/qdrant_knowledge.snapshot)")
     p.add_argument("--no-memory", action="store_true",
-                   help="disable memory: SigLIP visual recall + bge speech recall")
+                   help="disable memory: frames (SigLIP; searched by their words) "
+                        "and the conversation (bge)")
     p.add_argument("--on-robot", default=None, metavar="LIST",
                    help="which models run ON THE ROBOT, comma-separated "
                         "(asr, tts, detector, faces, embedder); anything not "

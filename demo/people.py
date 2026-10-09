@@ -8,10 +8,11 @@ only when the model calls `remember`. This is a different question, asked at a
 different time: not "what do I remember about this" but "who is standing
 there", and the answer is needed before the turn is answered, not during it.
 
-Meeting someone is a two-turn exchange the robot drives itself, without the
-language model: it asks for a name, the next thing said is taken as the
-answer, and the shots it has collected are enrolled under that name. Keeping
-the model out of it is deliberate — these two lines must be the same every
+Meeting someone is a two-turn exchange the robot drives itself: it asks for a
+name, the next thing said is taken as the answer — the model on the laptop
+reads the name out of it (demo/serve.py's /name) — and the shots it has
+collected are enrolled under that name. The robot's two lines are fixed, not
+generated, and no tool call is involved: these lines must be the same every
 time, and a tool call that misfires here would greet the room with silence.
 
 Calibrated on this robot's own camera (eight stored frames of one person):
@@ -23,7 +24,6 @@ the closest of them.
 from __future__ import annotations
 
 import dataclasses
-import re
 import time
 
 # Shots kept for one person at enrollment. More poses, more chances one of
@@ -49,45 +49,6 @@ ASK_NAME = "I don't think we've met. What's your name?"
 GREET_KNOWN = "Hello again, {name}!"
 GREET_NEW = "Nice to meet you, {name}. I'll remember you."
 NOT_CAUGHT = "Sorry, I didn't catch your name."
-
-# A name in an answer to "what's your name?" — "Sasha", "I'm Sasha",
-# "My name is Sasha". English only: the demo is English.
-_NAME = re.compile(
-    r"\b(?i:my name'?s|my name is|i'?m|i am|call me|this is|it'?s)\s+"
-    r"([A-Z][a-z]{1,15})\b")
-_NOT_A_NAME = frozenset({
-    "Sorry", "Not", "Just", "Fine", "Good", "Okay", "Sure", "Here", "Yes",
-    "No", "Hello", "Hi", "Hey", "Thanks", "Thank", "Nothing", "Nobody",
-    "Never", "Giving", "Going", "Doing", "Talking", "Trying", "Looking",
-    "What", "Who", "Why", "How", "When", "Where", "Please", "Maybe", "Well",
-    "And", "But", "The", "This", "That", "You", "Your", "Me", "My", "We",
-    "It", "Is", "Are", "Can", "Could", "Would", "Should", "Actually"})
-
-
-def name_from_answer(heard: str) -> str | None:
-    """The name in an answer to the name question.
-
-    The question was just asked, so a bare "Sasha." is the most likely shape
-    of the answer — that is what makes the lone capitalised word acceptable
-    here and not in ordinary conversation (demo/conversation.py's
-    speaker_name, which needs an explicit introduction)."""
-    text = (heard or "").strip()
-    if not text:
-        return None
-    match = _NAME.search(text)
-    if match and match.group(1) not in _NOT_A_NAME:
-        return match.group(1)
-    # No introduction, so the answer is most likely the bare name. Only a
-    # word written like one counts: the transcriber capitalises names and
-    # sentence openers, so "Sasha." passes and the "what" in "Sorry, what?"
-    # does not. Long answers are left alone — they are a sentence, not a name.
-    words = re.findall(r"[A-Za-z][A-Za-z'-]{1,15}", text)
-    if len(words) <= 3:
-        for word in words:
-            if word[:1].isupper() and word not in _NOT_A_NAME:
-                return word
-    return None
-
 
 @dataclasses.dataclass
 class Seen:
@@ -358,22 +319,20 @@ class People:
         attached to a face outlives the mistake.
 
         `read_name` (demo/run_demo.py, the laptop's /name) asks the model
-        what the name was; the pattern below is the fallback for when the
-        model cannot be asked."""
+        what the name was. A model that cannot be asked made nothing out,
+        and no pattern over the words stands in for it."""
         self.awaiting_name = False
         name = None
-        read = False
         if self._read_name is not None:
             try:
                 name = self._read_name(heard)
-                read = True
-            except Exception as exc:  # noqa: BLE001 — fall back to the pattern
+            except (OSError, ValueError, AttributeError) as exc:
+                # The laptop could not be asked, or answered nonsense: not
+                # caught, said so. A bug in the reader is not this — it
+                # reaches the turn's own handler with its traceback. Why no
+                # pattern stands in: demo/serve.py's NAME_SYSTEM.
                 print(f"  [people] the name reader failed "
                       f"({type(exc).__name__}: {exc})")
-        if not read:
-            # Only when the model could not be asked: its "no name here" is
-            # an answer, and the pattern takes "What's yours?" for a name.
-            name = name_from_answer(heard)
         if not name:
             return None, NOT_CAUGHT
         stored = self._memory.enroll(name, self._shots)
