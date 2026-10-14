@@ -64,7 +64,7 @@ def test_on_recall_and_on_speech_recall_shape_hits_like_web_dashboard(monkeypatc
     client = RemoteDisplayClient("mac.local", 8080)
     try:
         client.on_recall([{"jpeg_b64": "AAAA", "detections": [{"label": "cup"}],
-                          "score": 0.13}])
+                          "score": 0.13, "found_by": "picture"}])
         client.on_speech_recall([{"text": "my stream starts at 16:00",
                                  "score": 0.812}])
         assert _wait_until(lambda: len(calls) == 2)
@@ -74,7 +74,8 @@ def test_on_recall_and_on_speech_recall_shape_hits_like_web_dashboard(monkeypatc
     assert recall == {"event": "recall",
                       "data": {"frames": [{"jpeg_b64": "AAAA",
                                           "boxes": [{"label": "cup"}],
-                                          "score": 0.13, "weak": False}]}}
+                                          "score": 0.13, "found_by": "picture",
+                                          "weak": False}]}}
     assert speech == {"event": "speech_recall",
                       "data": {"items": [{"text": "my stream starts at 16:00",
                                          "score": 0.812, "source": ""}]}}

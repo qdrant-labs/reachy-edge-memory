@@ -34,7 +34,11 @@ Qdrant Edge"](https://www.youtube.com/watch?v=PxGlBlqTxJI&t=3709s).
 - **What it saw** is stored as frames, with SigLIP 2 vectors, when the objects in
   view change or when it is asked to look. The words about a frame — the
   objects, the people in it, what the robot said about it — get a second, text
-  vector on the same point.
+  vector on the same point. Whether a question names anything the frames hold,
+  those words say; which frame answers is found by the words and by the
+  picture itself — SigLIP puts the question in the pictures' space — and the
+  frame that stands out most in either comes first. A question that names
+  nothing gets the day: the picture nearest it and the ones least like it.
 - **Who it has met** is one point per person in the `people` shard: several shots
   of their face as a multivector, compared with MaxSim.
 - **What it was taught** — facts about Qdrant and about the robot itself — ships
@@ -52,7 +56,7 @@ robot.
 - macOS on Apple silicon, Python 3.12, [uv](https://docs.astral.sh/uv/) and
   `ffmpeg` (`brew install ffmpeg`) — the laptop's camera, microphone and speaker
   go through ffmpeg and afplay.
-- About 5 GB of disk for the models, downloaded from Hugging Face on first use.
+- About 6 GB of disk for the models, downloaded from Hugging Face on first use.
 - For the robot: a Reachy Mini (the Wireless one, with the CM4 inside), SSH
   access to it as `pollen` with a key, and the robot and the laptop on the same
   network. No robot? The simulator below stands in for it.
@@ -63,7 +67,7 @@ uv sync
 uv run python -m emulator.models      # download every model up front
 ```
 
-Download them up front: otherwise the first start fetches about 4 GB — Gemma 4
+Download them up front: otherwise the first start fetches about 5 GB — Gemma 4
 E2B, SigLIP 2 and Whisper — while `stage` waits four minutes for the models to
 come up, and on a slower connection it gives up first. The face embedder,
 HSFace, has no ready-made LiteRT build: this step builds it from its PyTorch

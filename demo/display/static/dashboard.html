@@ -280,7 +280,11 @@ es.addEventListener("recall", e => {
     if (typeof f.score === "number") {
       const tag = document.createElement("div");
       tag.className = "rscore";
-      tag.textContent = f.score.toFixed(2) + (f.weak ? " · weak match" : "");
+      // A frame recall ranked by its words or its picture carries a cosine
+      // of that search's own space — 0.85 by words and 0.13 by picture are
+      // not one scale — so the score says which it is.
+      tag.textContent = (f.found_by ? `by ${f.found_by} ` : "") + f.score.toFixed(2)
+                        + (f.weak ? " · weak match" : "");
       item.appendChild(tag);
     }
     recallEl.appendChild(item);

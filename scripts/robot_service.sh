@@ -153,9 +153,9 @@ if [ -n "$ON_ROBOT" ]; then
   case ",$ON_ROBOT," in *,asr,*) models="$models moonshine-tiny moonshine-tokenizer silero-vad";; esac
   case ",$ON_ROBOT," in
     *,embedder,*)
-      # SigLIP 2 and bge: fastembed loads bge, and brings the ONNX runtime
-      # and huggingface_hub SigLIP's vision tower needs. Both models are
-      # downloaded from the Hub by the robot itself, on first use.
+      # SigLIP 2 and bge: fastembed loads bge, and brings the tokenizer and
+      # ONNX runtime SigLIP 2 runs on. Both models are downloaded from the
+      # Hub by the robot itself, on first use.
       ssh_robot "'$RUN_PY' -c 'import fastembed' 2>/dev/null \
                  || '$RUN_PY' -m pip install -q fastembed";;
   esac

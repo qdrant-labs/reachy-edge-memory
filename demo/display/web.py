@@ -121,7 +121,7 @@ class WebDashboard:
 
     def on_recall(self, hits: list[dict]) -> None:
         """Show the frames a query recalled. `hits` are stored frames
-        (emulator/frame_memory.py's recall_text, day_frames or a look): each
+        (emulator/frame_memory.py's recall, day_frames or a look): each
         carries the stored `jpeg_b64` and the frame's YOLO `detections`
         (drawn as boxes).
 
@@ -134,6 +134,7 @@ class WebDashboard:
         "nothing recalled" resting state instead of silently going stale."""
         frames = [{"jpeg_b64": h["jpeg_b64"], "boxes": h.get("detections", []),
                    "score": round(float(h.get("score", 0.0)), 3),
+                   "found_by": h.get("found_by"),
                    "weak": bool(h.get("weak"))}
                   for h in hits if h.get("jpeg_b64")]
         self._recall(frames)

@@ -4,7 +4,7 @@ that carries no models of its own.
 Two shapes, because the two memories consume two different interfaces (see
 the module docstrings of emulator/frame_memory.py and emulator/memory.py):
 `RemoteSiglipEmbedder` satisfies FrameMemory's `Embedder` protocol
-(`embed_image`); `RemoteBgeEmbedder` satisfies the fastembed
+(`embed_image`/`embed_text`); `RemoteBgeEmbedder` satisfies the fastembed
 `embed()`/`query_embed()` shape TextMemory uses. Both send bytes over HTTP and
 get a vector back — constructing either loads nothing, which is the whole
 point: a memory built on the robot must be constructible without the models
@@ -38,7 +38,7 @@ from typing import TYPE_CHECKING
 import numpy as np
 
 from demo.embed_service import (DEFAULT_PORT, FACE_PATH, HEALTH_PATH,
-                                IMAGE_PATH, SPEECH_PATH)
+                                IMAGE_PATH, SPEECH_PATH, TEXT_PATH)
 
 if TYPE_CHECKING:
     from collections.abc import Iterable
@@ -153,6 +153,11 @@ class RemoteSiglipEmbedder:
             buf, format="JPEG", quality=UPLOAD_JPEG_QUALITY)
         jpeg_b64 = base64.b64encode(buf.getvalue()).decode("ascii")
         body = _post(self._base, IMAGE_PATH, {"jpeg_b64": jpeg_b64}, self._timeout,
+                     self._breaker)
+        return np.asarray(body["vector"], dtype=np.float32)
+
+    def embed_text(self, text: str) -> "NDArray[np.float32]":
+        body = _post(self._base, TEXT_PATH, {"text": text}, self._timeout,
                      self._breaker)
         return np.asarray(body["vector"], dtype=np.float32)
 

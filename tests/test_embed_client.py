@@ -12,7 +12,7 @@ import sys
 import numpy as np
 import pytest
 
-from demo.embed_service import IMAGE_PATH, SPEECH_PATH
+from demo.embed_service import IMAGE_PATH, SPEECH_PATH, TEXT_PATH
 from demo.embed_client import (
     RemoteBgeEmbedder,
     RemoteSiglipEmbedder,
@@ -55,9 +55,7 @@ def test_embed_service_url_defaults_to_embed_services_port():
     assert embed_service_url("10.0.0.5") == f"http://10.0.0.5:{DEFAULT_PORT}"
 
 
-# --- RemoteSiglipEmbedder: embed_image ---
-
-_FRAME = np.zeros((4, 4, 3), dtype=np.uint8)
+# --- RemoteSiglipEmbedder: embed_image / embed_text ---
 
 def test_embed_image_posts_a_base64_jpeg_to_the_image_path(monkeypatch):
     captured: dict = {}
@@ -75,17 +73,36 @@ def test_embed_image_posts_a_base64_jpeg_to_the_image_path(monkeypatch):
     assert vector.tolist() == [1.0, 0.0, 0.0]
 
 
-def test_siglip_embedder_failure_raises_rather_than_returning_a_vector(monkeypatch):
+def test_embed_text_posts_to_the_text_path(monkeypatch):
+    captured: dict = {}
+    monkeypatch.setattr("urllib.request.urlopen",
+                        _vector_urlopen([0.0, 1.0, 0.0], captured))
+    embedder = RemoteSiglipEmbedder("10.0.0.5")
+
+    vector = embedder.embed_text("a red apple")
+
+    assert captured["url"] == embed_service_url("10.0.0.5") + TEXT_PATH
+    assert captured["body"] == {"text": "a red apple"}
+    assert vector.tolist() == [0.0, 1.0, 0.0]
+
+
+_FRAME = np.zeros((4, 4, 3), np.uint8)
+
+
+@pytest.mark.parametrize("call", [lambda e: e.embed_image(_FRAME),
+                                  lambda e: e.embed_text("hello")],
+                         ids=["picture", "question"])
+def test_siglip_embedder_failure_raises_rather_than_returning_a_vector(monkeypatch, call):
     # A camera drop-out costs a frame; a memory that swallows a failed write
     # costs the demo its premise (see the module docstring) — the client must
-    # never turn a connection failure into a fake vector.
+    # never turn a connection failure into a fake vector, on either tower.
     def failing_urlopen(request, timeout=None):
         raise OSError("connection refused")
 
     monkeypatch.setattr("urllib.request.urlopen", failing_urlopen)
     embedder = RemoteSiglipEmbedder("10.0.0.5")
     with pytest.raises(OSError):
-        embedder.embed_image(_FRAME)
+        call(embedder)
 
 
 # --- RemoteBgeEmbedder: embed() (document side) vs query_embed() (query side) ---
@@ -155,7 +172,7 @@ def test_default_timeout_is_short(monkeypatch):
     captured: dict = {}
     monkeypatch.setattr("urllib.request.urlopen",
                         _vector_urlopen([1.0, 0.0, 0.0], captured))
-    RemoteSiglipEmbedder("10.0.0.5").embed_image(_FRAME)
+    RemoteSiglipEmbedder("10.0.0.5").embed_text("hello")
 
     assert captured["timeout"] == DEFAULT_TIMEOUT_S
 
@@ -175,11 +192,11 @@ def test_siglip_embedder_trips_cooldown_after_consecutive_failures(monkeypatch):
     embedder = RemoteSiglipEmbedder("10.0.0.5")
     for _ in range(CONSECUTIVE_FAILURES_BEFORE_COOLDOWN):
         with pytest.raises(OSError):
-            embedder.embed_image(_FRAME)
+            embedder.embed_text("hello")
     assert calls["n"] == CONSECUTIVE_FAILURES_BEFORE_COOLDOWN
 
     with pytest.raises(TimeoutError):
-        embedder.embed_image(_FRAME)
+        embedder.embed_text("hello")
     assert calls["n"] == CONSECUTIVE_FAILURES_BEFORE_COOLDOWN, (
         "a call made during the cooldown window must not hit the network")
 
@@ -198,15 +215,15 @@ def test_siglip_embedder_cooldown_recovers_automatically(monkeypatch):
     embedder = RemoteSiglipEmbedder("10.0.0.5")
     for _ in range(CONSECUTIVE_FAILURES_BEFORE_COOLDOWN):
         with pytest.raises(OSError):
-            embedder.embed_image(_FRAME)
+            embedder.embed_text("hello")
 
     with pytest.raises(TimeoutError):
-        embedder.embed_image(_FRAME)  # still inside the cooldown window
+        embedder.embed_text("hello")  # still inside the cooldown window
 
     clock["t"] += FAILURE_COOLDOWN_S + 0.01
     monkeypatch.setattr("urllib.request.urlopen",
                         _vector_urlopen([1.0, 0.0, 0.0], {}))
-    vector = embedder.embed_image(_FRAME)  # cooldown elapsed — hits the network again
+    vector = embedder.embed_text("hello")  # cooldown elapsed — hits the network again
     assert vector.tolist() == [1.0, 0.0, 0.0]
 
 
@@ -246,9 +263,9 @@ def test_siglip_and_bge_embedders_have_independent_cooldowns(monkeypatch):
     bge = RemoteBgeEmbedder("10.0.0.5")
     for _ in range(CONSECUTIVE_FAILURES_BEFORE_COOLDOWN):
         with pytest.raises(OSError):
-            siglip.embed_image(_FRAME)
+            siglip.embed_text("hello")
     with pytest.raises(TimeoutError):
-        siglip.embed_image(_FRAME)
+        siglip.embed_text("hello")
 
     # bge's own breaker hasn't tripped — it still hits the (failing) network
     # and raises the original OSError, not a cooldown TimeoutError.

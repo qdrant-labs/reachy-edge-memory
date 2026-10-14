@@ -58,7 +58,7 @@ def test_on_recall_broadcasts_frames_with_boxes():
     hits = [{"jpeg_b64": "AAAA",
              "detections": [{"label": "cup", "box": [0.4, 0.4, 0.6, 0.6],
                              "score": 0.8}],
-             "labels": ["cup"], "score": 0.13}]
+             "labels": ["cup"], "score": 0.13, "found_by": "picture"}]
     dash.on_recall(hits)
     msgs = drain(q)
     recall = [m for m in msgs if m.startswith("event: recall\n")]
@@ -67,7 +67,8 @@ def test_on_recall_broadcasts_frames_with_boxes():
     # The picture is not in the event: the page fetches it from the server.
     assert payload["frames"] == [{"url": "/recall/1/0.jpg",
                                   "boxes": hits[0]["detections"],
-                                  "score": 0.13, "weak": False}]
+                                  "score": 0.13, "found_by": "picture",
+                                  "weak": False}]
     assert dash.recall_jpeg("/recall/1/0.jpg") == base64.b64decode("AAAA")
     assert dash.recall_jpeg("/recall/0/0.jpg") is None      # an older recall
     assert dash.recall_jpeg("/recall/1/5.jpg") is None      # no such frame

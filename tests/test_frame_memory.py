@@ -20,10 +20,23 @@ class FakeEmbedder:
     differently share nothing (0.0)."""
 
     _BASIS = {0: [1.0, 0.0, 0.0], 1: [0.0, 1.0, 0.0], 2: [0.0, 0.0, 1.0]}
+    # What each stamp is a picture of, for a question in the same space.
+    _LOOKS_LIKE = {"cup": 0, "lamp": 1, "door": 2}
 
     def embed_image(self, frame_rgb):
         idx = int(np.asarray(frame_rgb)[0, 0, 0])
         return np.asarray(self._BASIS.get(idx, [0.0, 0.0, 0.0]), np.float32)
+
+    def embed_text(self, text):
+        # A question lands on the pictures of what it asks about, nearest the
+        # first thing it names; one about nothing in particular is as near
+        # every picture as any other.
+        named = sorted((text.find(thing), i) for thing, i in self._LOOKS_LIKE.items()
+                       if thing in text)
+        if not named:
+            return np.ones(3, np.float32)
+        return sum(np.asarray(self._BASIS[i], np.float32) / (rank + 1)
+                   for rank, (_, i) in enumerate(named))
 
 
 def _frame(basis: int) -> np.ndarray:
@@ -340,6 +353,132 @@ def test_min_distance_is_what_counts_as_a_different_picture(monkeypatch):
 
 def test_the_day_of_a_robot_that_has_seen_nothing_is_empty():
     assert _mem().day_frames() == []
+    assert _mem().day_frames(like="a door") == []
+
+
+def test_the_day_is_led_by_the_picture_nearest_the_question(monkeypatch):
+    """A door no label names is found by what it looks like: the picture
+    search picks the day's first frame, and the rest are picked around it."""
+    _clock(monkeypatch, [10.0, 20.0, 30.0])
+    mem = _mem()
+    mem.remember(_frame(2), [{"label": "person"}])   # a door; no word says so
+    mem.remember(_frame(1), [{"label": "person"}])
+    mem.remember(_frame(0), [{"label": "person"}])
+    assert [frame["ts"] for frame in mem.day_frames(limit=1, like="did you see a door?")] == [10.0]
+    assert [frame["ts"] for frame in mem.day_frames(limit=1)] == [30.0], "no question: the newest"
+    assert [frame["ts"] for frame in mem.day_frames(limit=1, like="  ")] == [30.0]
+    # Led by the door, the day is still the day, newest first.
+    assert [frame["ts"] for frame in mem.day_frames(like="a door")] == [30.0, 20.0, 10.0]
+
+
+def test_a_picture_older_than_the_pool_still_leads(monkeypatch):
+    # The pool is the newest scenes; the search runs over every frame, so an
+    # old picture of the thing asked about is not aged out of the answer.
+    import itertools
+
+    import emulator.frame_memory as frame_memory
+
+    monkeypatch.setattr(frame_memory, "DAY_POOL_SCENES", 2)
+    _clock(monkeypatch, itertools.count(10.0, 10.0))
+    mem = _mem()
+    mem.remember(_frame(2), [{"label": "person"}])
+    for _ in range(4):
+        mem.remember(_frame(0), [{"label": "person"}])
+    assert [frame["ts"] for frame in mem.day_frames(limit=1, like="a door")] == [10.0]
+
+
+def test_a_picture_taken_during_this_turn_never_leads(monkeypatch):
+    # The camera's frame of the door, taken while the question was asked, is
+    # the present: the nearest picture from before the turn leads instead,
+    # not merely the newest.
+    _clock(monkeypatch, [10.0, 20.0, 30.0])
+    mem = _mem()
+    mem.remember(_frame(1), [{"label": "person"}])   # a lamp
+    mem.remember(_frame(0), [{"label": "person"}])   # a cup
+    mem.remember(_frame(2), [{"label": "person"}])   # the door, during the turn
+    day = mem.day_frames(limit=1, before=25.0, like="a door, or else a lamp")
+    assert [frame["ts"] for frame in day] == [10.0]
+
+
+def test_the_lead_is_the_frame_itself_not_its_time(monkeypatch):
+    # Two frames stored in the same instant: the one whose picture matched
+    # leads, not whichever of the two the walk met first.
+    _clock(monkeypatch, [10.0, 10.0])
+    mem = _mem()
+    mem.remember(_frame(0), [{"label": "table"}])    # a cup
+    mem.remember(_frame(2), [{"label": "chair"}])    # a door
+    assert [frame["labels"] for frame in mem.day_frames(limit=1, like="a door")] == [["chair"]]
+    assert [frame["labels"] for frame in mem.day_frames(limit=1, like="a cup")] == [["table"]]
+
+
+def _down(text):
+    raise OSError("connection refused")
+
+
+def _tower_failed(text):
+    raise RuntimeError("[ONNXRuntimeError] : 6 : RUNTIME_EXCEPTION : inference failed")
+
+
+@pytest.mark.parametrize("embed_text", [
+    _down,
+    lambda text: np.asarray(None, dtype=np.float32),   # {"vector": null}
+    lambda text: np.ones((1, 3), np.float32),           # nested
+    lambda text: np.ones(4, np.float32),                # another size
+    lambda text: np.full(3, np.nan, np.float32),
+    lambda text: [10 ** 1000, 0, 0],                    # a number no float holds
+    lambda text: np.zeros(3, np.float32),               # no direction at all
+    lambda text: np.full(3, 1e-30, np.float32),         # a length that underflows
+    lambda text: np.full(3, 3e38, np.float32),          # a length that overflows
+    _tower_failed,                                       # the text tower on the robot
+], ids=["down", "null", "nested", "size", "nan", "overflow", "zero", "tiny", "huge",
+        "onnx"])
+def test_no_picture_search_still_leaves_the_day(monkeypatch, caplog, embed_text):
+    # The words were searched already and found nothing: with the embed
+    # service down for the question, answering no vector, or the text tower
+    # failing, the day is still the answer — led by the newest frame, and
+    # said in the log.
+    import itertools
+
+    _clock(monkeypatch, itertools.count(10.0, 10.0))  # the log reads the clock too
+    embedder = FakeEmbedder()
+    mem = FrameMemory(embedder=embedder)
+    mem.remember(_frame(2), [{"label": "person"}])
+    mem.remember(_frame(0), [{"label": "person"}])
+    embedder.embed_text = embed_text
+    with caplog.at_level("WARNING", logger="emulator.frame_memory"):
+        day = mem.day_frames(limit=1, like="a door")
+    assert [frame["ts"] for frame in day] == [20.0]
+    assert any("no picture search" in record.getMessage() for record in caplog.records)
+
+
+@pytest.mark.parametrize("embed_text, traceback", [(_down, False), (_tower_failed, True)],
+                         ids=["outage", "bug"])
+def test_only_a_failure_that_is_no_outage_is_logged_with_its_traceback(
+        monkeypatch, caplog, embed_text, traceback):
+    # An embed service that is down says so in one line; anything else may
+    # be a bug, and its traceback is what finds it.
+    import itertools
+
+    _clock(monkeypatch, itertools.count(10.0, 10.0))
+    embedder = FakeEmbedder()
+    mem = FrameMemory(embedder=embedder)
+    mem.remember(_frame(0), [{"label": "person"}])
+    embedder.embed_text = embed_text
+    with caplog.at_level("WARNING", logger="emulator.frame_memory"):
+        mem.day_frames(like="a door")
+    [record] = [r for r in caplog.records if "no picture search" in r.getMessage()]
+    assert bool(record.exc_info) is traceback
+
+
+def test_a_question_and_a_picture_in_different_spaces_fail_the_start():
+    # A text tower that is missing or of another size would fail the first
+    # question no frame's words answer; it fails the start instead.
+    class Mismatched(FakeEmbedder):
+        def embed_text(self, text):
+            return np.ones(4, np.float32)
+
+    with pytest.raises(ValueError, match="not one space"):
+        FrameMemory(embedder=Mismatched())
 
 
 class FakeWords:
@@ -500,3 +639,112 @@ def test_the_names_in_a_frame_are_a_flat_list_like_the_labels():
     mem.remember(_frame(1), [{"label": "cup"}])
     stored = [payload for _id, payload in mem._store.iter_points()]
     assert sorted(p.get("names", []) for p in stored) == [[], ["Robin", "Sasha"]]
+
+
+# — recall: by the words or by the picture, whichever singles a frame out —
+
+def _words_and_pictures(monkeypatch, stamps_and_labels, *, names=None):
+    import itertools
+
+    _clock(monkeypatch, itertools.count(10.0, 10.0))
+    mem = FrameMemory(embedder=FakeEmbedder(), text_embedder=FakeWords())
+    for i, (stamp, labels) in enumerate(stamps_and_labels):
+        meta = {"names": names[i]} if names and names[i] else None
+        mem.remember(_frame(stamp), [{"label": label} for label in labels], meta=meta)
+    return mem
+
+
+def test_a_frame_its_picture_singles_out_beats_frames_the_words_only_match(monkeypatch):
+    # The words hold "bottle" on five frames of the same cup, and on none of
+    # the door; asked about a bottle by the door, the one frame of a door
+    # stands out among all of them by its picture far more than any of the
+    # five does by its words — the robot's "a door" on "I saw chair,
+    # keyboard, person".
+    mem = _words_and_pictures(monkeypatch, [(0, ["bottle"])] * 5 + [(2, ["person"])])
+    found = mem.recall("a bottle by the door")
+    assert found[0]["labels"] == ["person"] and found[0]["found_by"] == "picture"
+
+
+def test_a_name_is_found_by_the_words_when_no_picture_stands_out(monkeypatch):
+    # SigLIP knows no one's name: "Did you see Sasha?" lands as near every
+    # picture as any other, and the frame her name is written on comes first.
+    mem = _words_and_pictures(monkeypatch, [(0, ["person"]), (1, ["person"]), (2, ["person"])],
+                              names=[None, ["Sasha"], None])
+    found = mem.recall("Did you see Sasha?")
+    assert found[0]["names"] == ["Sasha"] and found[0]["found_by"] == "words"
+
+
+def test_nothing_the_words_hold_is_nothing_whatever_the_pictures_say(monkeypatch):
+    # Whether the question names anything is the words' to say: the door's
+    # picture is there, but no frame's words hold a curtain.
+    mem = _words_and_pictures(monkeypatch, [(0, ["bottle"]), (2, ["person"])])
+    assert mem.recall("a curtain by the door") == []
+
+
+def test_a_frame_from_this_turn_is_never_found(monkeypatch):
+    mem = _words_and_pictures(monkeypatch, [(0, ["bottle"])] * 3 + [(2, ["bottle"])])
+    found = mem.recall("a bottle by the door", before=35.0)
+    assert found and all(frame["ts"] < 35.0 for frame in found)
+
+
+def test_without_the_picture_search_the_words_still_find(monkeypatch, caplog):
+    mem = _words_and_pictures(monkeypatch, [(0, ["person"]), (2, ["bottle"])])
+    mem._embedder.embed_text = _down
+    with caplog.at_level("WARNING", logger="emulator.frame_memory"):
+        found = mem.recall("a bottle by the door")
+    assert found[0]["labels"] == ["bottle"] and found[0]["found_by"] == "words"
+    assert any("no picture search" in record.getMessage() for record in caplog.records)
+
+
+def test_frames_without_words_score_as_the_empty_frame_does(monkeypatch):
+    # Frames stored while bge was down carry no words. Left out of the words'
+    # spread, the one frame whose words held the bottle stood out by nothing,
+    # and two frames of a lamp the picture search liked came first.
+    import itertools
+
+    _clock(monkeypatch, itertools.count(10.0, 10.0))
+    words = FakeWords()
+    mem = FrameMemory(embedder=FakeEmbedder(), text_embedder=words)
+    mem.remember(_frame(0), [{"label": "bottle"}])
+    working = words.embed
+    words.embed = lambda texts: (_ for _ in ()).throw(OSError("bge down"))
+    for stamp in (1, 1, 2, 2):
+        mem.remember(_frame(stamp), [{"label": "person"}])
+    words.embed = working
+    mem._embedder.embed_text = lambda text: np.asarray([0.0, 1.0, 0.0], np.float32)  # the lamp
+    found = mem.recall("a bottle")
+    assert found[0]["labels"] == ["bottle"] and found[0]["found_by"] == "words"
+
+
+def test_one_bge_call_finds_and_ranks(monkeypatch):
+    # The gate and the ranking share one embedding: a second call that
+    # failed would lose a question the first had already found.
+    mem = _words_and_pictures(monkeypatch, [(0, ["bottle"]), (2, ["person"])])
+    calls = []
+    embed = mem._text_embedder.query_embed
+    mem._text_embedder.query_embed = lambda texts: calls.append(texts) or embed(texts)
+    found = mem.recall("a bottle by the door")
+    assert found and len(calls) == 1
+    assert all(0.0 < frame["score"] <= 1.0 for frame in found), "the dashboard shows it"
+
+
+def test_a_frame_added_during_the_scoring_is_scored_by_both_searches(monkeypatch):
+    # The searches run without this memory's lock: a frame the scene writer
+    # stores between the count and them would be scored by one and not the
+    # other, so the frames are scored again as they are now.
+    mem = _words_and_pictures(monkeypatch, [(0, ["bottle"]), (0, ["bottle"])])
+    counts = []
+    count = mem._store.count
+    mem._store.count = lambda *a, **k: counts.append(1) or count(*a, **k)
+    search = mem._store.nearest_ids
+    added = []
+
+    def writer_runs_meanwhile(*args, **kwargs):
+        if not added:
+            added.append(mem.remember(_frame(2), [{"label": "bottle"}]))
+        return search(*args, **kwargs)
+
+    mem._store.nearest_ids = writer_runs_meanwhile
+    found = mem.recall("a bottle by the door")
+    assert len(counts) == 4, "counted, changed, counted again and held"
+    assert found[0]["labels"] == ["bottle"] and found[0]["found_by"] == "picture"

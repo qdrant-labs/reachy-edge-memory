@@ -166,6 +166,19 @@ class EdgeStore:
                 filter=query_filter, with_payload=True))
         return [{**(hit.payload or {}), "score": float(hit.score)} for hit in hits]
 
+    def nearest_ids(self, vector: Any, limit: int, query_filter: Any | None = None, *,
+                    using: str) -> list[tuple[str, float]]:
+        """(id, score) of the nearest points by one named vector, best first —
+        search() for a caller that needs the point itself and its score, not
+        what it carries."""
+        from qdrant_edge import Query, QueryRequest
+
+        with self._lock:
+            hits = self._shard.query(QueryRequest(
+                query=Query.Nearest(vector, using=using), limit=limit,
+                filter=query_filter, with_payload=False))
+        return [(str(hit.id), float(hit.score)) for hit in hits]
+
     def iter_points(self, query_filter: Any | None = None,
                     fields: list[str] | None = None) -> "Iterator[tuple[str, dict]]":
         """Every stored point as (id, payload), a page at a time — only those
@@ -241,6 +254,13 @@ def match_any(key: str, values: list):
     from qdrant_edge import FieldCondition, Filter, MatchAny
 
     return Filter(must=[FieldCondition(key=key, match=MatchAny(any=list(values)))])
+
+
+def less_than(key: str, value: float):
+    """A payload range condition — `ts < value` and the like."""
+    from qdrant_edge import FieldCondition, Filter, RangeFloat
+
+    return Filter(must=[FieldCondition(key=key, range=RangeFloat(lt=value))])
 
 
 def all_of(*filters):

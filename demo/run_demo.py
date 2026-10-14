@@ -824,8 +824,8 @@ def _talk(heard, detections, endpoint, robot, display, conversation, *,
             names_fn=lambda: _names_in(people, frame),
             move_fn=lambda how: _move(robot, how, robot_dispatcher),
             knowledge_fn=lambda query: lookup(query, knowledge=knowledge),
-            day_frames_fn=lambda: day_frames(frame_memory=frame_memory,
-                                             turn_started_at=turn_started_at),
+            day_frames_fn=lambda query: day_frames(query, frame_memory=frame_memory,
+                                                   turn_started_at=turn_started_at),
             camera_jpeg=lambda: frame_to_jpeg(frame) if frame is not None else None)
     except (OSError, ValueError) as exc:
         # The brain dropped mid-turn (network, a malformed line): say nothing

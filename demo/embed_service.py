@@ -13,10 +13,10 @@ through here to be measured, and is stored there.
 
 Two embedders, one for pictures and one for words:
 
-- SigLIP 2 (768-d) for frames: the picture's own vector, which the robot
-  picks the day's most different frames by (emulator/frame_memory.py's
-  day_frames). Only the vision tower: no question is searched against a
-  picture (see that module's docstring).
+- SigLIP 2 (768-d) for frames, both towers: the picture's own vector, and a
+  question in the same space, so a question is searched against the
+  pictures themselves — a door no label names is found by what it looks
+  like (emulator/frame_memory.py's day_frames).
 - bge-small (384-d) for text: what was said, the words about a frame and the
   facts, searched by meaning.
 
@@ -47,6 +47,7 @@ IMAGE_PATH = "/embed/image"
 # (emulator/face.py). Nothing about a face is kept here — the robot stores and
 # matches it in its own shard (emulator/face_memory.py).
 FACE_PATH = "/embed/face"
+TEXT_PATH = "/embed/text"
 SPEECH_PATH = "/embed/speech"
 HEALTH_PATH = "/health"
 
@@ -148,8 +149,10 @@ class Embedders:
         return self._face_boxes
 
     def warm(self) -> None:
-        """Pay both load costs before the robot is waiting on a turn."""
+        """Pay the load costs before the robot is waiting on a turn: both of
+        SigLIP's towers, bge, and the face models when they are there."""
         self.siglip().embed_image(np.zeros((64, 64, 3), np.uint8))
+        self.siglip().embed_text("warm")
         next(iter(self.bge().embed(["warm"])))
         try:
             self.faces()
@@ -191,6 +194,8 @@ def make_handler(embedders: Embedders):
             try:
                 if self.path == IMAGE_PATH:
                     self._embed_image()
+                elif self.path == TEXT_PATH:
+                    self._embed_text()
                 elif self.path == SPEECH_PATH:
                     self._embed_speech()
                 elif self.path == FACE_PATH:
@@ -242,6 +247,13 @@ def make_handler(embedders: Embedders):
             self._send_json({"faces": [
                 {"box": face.box, "score": face.score,
                  "embedding": face.embedding} for face in faces]})
+
+        def _embed_text(self):
+            """A query in, a SigLIP TEXT vector out — the same space as the
+            frames, which is what makes the search cross-modal."""
+            vector = embedders.siglip().embed_text(
+                str(_field(self._read_json(), "text")))
+            self._send_json({"vector": [float(x) for x in vector]})
 
         def _embed_speech(self):
             """An utterance in, a bge vector out. `query=true` uses the

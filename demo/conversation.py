@@ -315,23 +315,24 @@ def recall(query: str, *, window: ConversationWindow, speech_memory=None,
 def recall_seen(query: str, *, frame_memory=None,
                 turn_started_at: float | None = None,
                 direction: str | None = None) -> list[dict]:
-    """The `recall_seen` tool: the stored frames whose WORDS hold what `query`
-    asked about — labels, names, the side it looked, the caption
-    (emulator/frame_memory.py's recall_text) — best first. A question about a
-    thing is a question in words: measured on the robot's own 371 frames,
-    that search finds 32 right frames of 36 where a SigLIP text-to-image
-    search (since removed) found 8.
+    """The `recall_seen` tool: the stored frames a question about a thing
+    finds, best first (emulator/frame_memory.py's recall). Whether it names
+    anything the frames hold is said by their WORDS — labels, names, the side
+    it looked, the caption; which frames answer, by their words or by their
+    pictures, whichever singles a frame out among everything seen: the door
+    no label names by its picture, Sasha by her name.
 
     direction ("left"/"right") gives the last frame taken with the head turned
     that way: "what was on your left?" is about the LAST look there, and a
     search by words would rank the best-matching look that way first.
 
     A question that named nothing in particular — "what did you see today?"
-    — finds nothing here: recall_text drops a frame that scores no better than
-    an empty one. That is what sends a `seen` question to the day's frames
-    (_answer_tool). Nothing falls back to the nearest picture: no gate on the
-    picture search told the day from a thing, and it is gone
-    (emulator/frame_memory.py's docstring has the numbers).
+    — finds nothing here: the words search drops a frame that scores no
+    better than an empty one. That is what sends a `seen` question to the
+    day's frames (_answer_tool), led by the picture nearest the question
+    (day_frames below). The picture search is never the gate: no score on it
+    told the day from a thing (emulator/frame_memory.py's docstring has the
+    numbers).
 
     turn_started_at drops frames stored during this very turn — the scene
     writer stores one the moment a new object lands in view, often while the
@@ -343,25 +344,29 @@ def recall_seen(query: str, *, frame_memory=None,
         if direction in TURNED:
             return frame_memory.latest_looks([direction], limit=1,
                                              before=turn_started_at)
-        return frame_memory.recall_text(query, before=turn_started_at)
+        return frame_memory.recall(query, before=turn_started_at)
     except Exception as exc:  # noqa: BLE001 — said to the model
         raise MemoryUnavailable(f"frames: {type(exc).__name__}: {exc}") from exc
 
 
-def day_frames(*, frame_memory=None, turn_started_at: float | None = None) -> list[dict]:
+def day_frames(query: str = "", *, frame_memory=None,
+               turn_started_at: float | None = None) -> list[dict]:
     """The frames that stand for the day, for a question about what was seen
     that no frame's words answer (recall_seen).
 
     Pictures, not a list of objects: a frame IS the memory, and the labels are
     metadata that only help pick which one. The
-    picking is emulator/frame_memory.py's day_frames — the newest frame, then
-    whatever looks least like it — because the newest four frames of a real
-    evening were the same picture four times (closest pair 0.914) and picked
-    this way they are four different scenes (0.609)."""
+    picking is emulator/frame_memory.py's day_frames — the picture nearest
+    `query` (the newest frame without one), then whatever looks least like it
+    — because the newest four frames of a real evening were the same picture
+    four times (closest pair 0.914) and picked this way they are four
+    different scenes (0.609). Where the pick starts is the picture search:
+    "did you see a door?", with no label for one, comes back with the door
+    among the frames, and the model, looking, says so."""
     if frame_memory is None:
         return []
     try:
-        return frame_memory.day_frames(before=turn_started_at)
+        return frame_memory.day_frames(before=turn_started_at, like=query)
     except Exception as exc:  # noqa: BLE001 — said to the model
         raise MemoryUnavailable(f"frames: {type(exc).__name__}: {exc}") from exc
 
@@ -476,16 +481,32 @@ def memory_note(frame: dict, now: float) -> str:
     were stored with it, and demo/chat_session.py's IMAGE_SYSTEM already
     promises "when the note names the people in it, call them by their name"
     — but this note never named anyone, so a recalled picture of the person
-    the robot had met came back as "a man with blonde hair"."""
+    the robot had met came back as "a man with blonde hair".
+
+    And WHERE in the picture each named face is, from its box: told only
+    "Sasha was in it", the model looked at two people and answered "I did
+    not see Sasha" in 2 of 12 answers about six frames of the robot's own
+    evening; told "(Sasha on the left)", it named her in all 12."""
     where = f" {TURNED[frame['looked']]}" if frame.get("looked") in TURNED else ""
     names = frame_names(frame)
     who_was_there = ""
     if names:
+        placed = [f"{person['name']} {_place(person['box'])}"
+                  for person in frame.get("people") or []
+                  if person.get("name") and len(person.get("box") or ()) == 4]
         who_was_there = (f" {' and '.join(names)} "
-                         f"{'was' if len(names) == 1 else 'were'} in it.")
+                         f"{'was' if len(names) == 1 else 'were'} in it"
+                         + (f" ({', '.join(placed)})" if placed else "") + ".")
     return (f"(This is your MEMORY of what you saw{where} {_ago(now - frame.get('ts', now))} "
             "— it is not in front of you now, and nobody sent it to you."
             f"{who_was_there} Answer in the past tense.)")
+
+
+def _place(box) -> str:
+    """Where a face's box (x0, y0, x1, y1, as fractions of the frame) sits
+    across the picture the model is shown."""
+    middle = (box[0] + box[2]) / 2
+    return "on the left" if middle < 0.4 else "on the right" if middle > 0.6 else "in the middle"
 
 
 def _ago(seconds: float) -> str:
@@ -734,13 +755,13 @@ def _answer_tool(name, arguments, heard, history, recall_fn,
         if not frames:
             # Seen, and no frame's words hold anything the question asked
             # about: it named nothing — "what did you see today?" — or a thing
-            # no frame holds. Both are answered from the day itself, as
-            # pictures: the newest frame and whatever looks least like it, so
-            # the answer is several moments and not one picture three times,
-            # and the model, looking at them, says whether the thing was
-            # there. Nothing here tells the two kinds of question apart — that
-            # took a list of words.
-            day = ([frame for frame in day_frames_fn() if frame.get("jpeg_b64")]
+            # no frame's words hold. Both are answered from the day itself, as
+            # pictures: the one nearest the question by picture, and whatever
+            # looks least like it, so the answer is several moments and not
+            # one picture three times, and the model, looking at them, says
+            # whether the thing was there. Nothing here tells the two kinds of
+            # question apart — that took a list of words.
+            day = ([frame for frame in day_frames_fn(query) if frame.get("jpeg_b64")]
                    if day_frames_fn is not None else [])
             if day:
                 display.on_recall(_shown(day))

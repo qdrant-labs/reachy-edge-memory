@@ -131,8 +131,8 @@ def test_search_finds_in_context_exchanges_over_the_gate():
 # — the recall tool —
 
 class _Frames:
-    """FrameMemory stand-in: `words` answer the frame-words search (filtered
-    by `before`, as the real recall_text is), `looks` are the frames taken on
+    """FrameMemory stand-in: `words` answer the frames search (filtered by
+    `before`, as the real recall is), `looks` are the frames taken on
     request (newest first, as latest_looks returns them), `day` the day's
     frames."""
 
@@ -144,15 +144,17 @@ class _Frames:
         self.word_queries = []
         self.word_befores = []
         self.day_befores = []
+        self.day_likes = []
 
-    def recall_text(self, query, k=3, before=None):
+    def recall(self, query, k=3, before=None):
         self.word_queries.append(query)
         self.word_befores.append(before)
         return [frame for frame in self.words
                 if before is None or frame.get("ts", 0.0) < before]
 
-    def day_frames(self, before=None):
+    def day_frames(self, before=None, like=None):
         self.day_befores.append(before)
+        self.day_likes.append(like)
         return [frame for frame in self.day
                 if before is None or frame.get("ts", 0.0) < before]
 
@@ -570,7 +572,7 @@ def test_with_one_memory_off_the_question_is_answered_by_the_one_it_needs():
         brain = _Brain(_call("remember", "my dog", about=about),
                        {"reply": "...", "token_count": 1})
         _turn(question, brain, recall_fn=words, recall_seen_fn=frames,
-              day_frames_fn=lambda: [])
+              day_frames_fn=lambda query: [])
         assert brain.requests[1].tool_result["result"] == expected, (about, words, frames)
 
 
@@ -653,19 +655,21 @@ def test_recall_seen_drops_frames_stored_during_this_turn():
 
 
 def test_the_day_leaves_out_the_frames_stored_during_this_turn():
-    # The newest frame is always the first of the day: without the turn's
-    # start it would be the present, on the screen, as a memory.
+    # The turn's own frame is the newest, and can be the picture nearest the
+    # question too: without the turn's start it would be the present, on the
+    # screen, as a memory.
     frames = _Frames(day=[_frame(0.0, ts=50.0), _frame(0.0, ts=10.0)])
-    assert [frame["ts"] for frame in day_frames(frame_memory=frames,
+    assert [frame["ts"] for frame in day_frames("a door", frame_memory=frames,
                                                 turn_started_at=40.0)] == [10.0]
     assert frames.day_befores == [40.0]
+    assert frames.day_likes == ["a door"], "the question leads the day by picture"
 
 
 def test_recall_seen_reports_a_failing_store():
     from demo.conversation import MemoryUnavailable
 
     class Down:
-        def recall_text(self, query, before=None):
+        def recall(self, query, before=None):
             raise OSError("down")
 
     with pytest.raises(MemoryUnavailable):
@@ -1057,6 +1061,22 @@ def test_a_recalled_picture_says_who_was_in_it():
     assert "in it" not in memory_note({"ts": 900.0}, 1000.0)
 
 
+def test_a_recalled_picture_says_where_each_named_face_is():
+    # Told only "Sasha was in it", the model looked at two people and said
+    # it did not see Sasha (2 of 12 answers on the robot's own frames); told
+    # where she was, it named her every time.
+    from demo.conversation import memory_note
+
+    frame = {"ts": 900.0, "names": ["Sasha", "Masha"],
+             "people": [{"name": "Sasha", "box": [0.2, 0.1, 0.3, 0.4]},
+                        {"name": "Masha", "box": [0.7, 0.1, 0.9, 0.4]},
+                        {"name": None, "box": [0.45, 0.1, 0.55, 0.4]}]}
+    assert ("Sasha and Masha were in it (Sasha on the left, Masha on the right)."
+            in memory_note(frame, 1000.0))
+    frame = {"ts": 900.0, "people": [{"name": "Sasha", "box": [0.4, 0.1, 0.6, 0.4]}]}
+    assert "Sasha was in it (Sasha in the middle)." in memory_note(frame, 1000.0)
+
+
 def test_a_look_that_answers_keeps_the_latest_exchanges_out():
     """The latest exchanges are read back only when nothing else answered
     (_answer_tool). A look that answers is the answer; the exchanges beside
@@ -1195,10 +1215,13 @@ def test_a_question_with_no_subject_comes_back_as_the_days_pictures():
     display = _Display()
     brain = _Brain(_call("remember", "what did you see today?", about="seen"),
                    {"reply": "A window, and a desk.", "token_count": 1})
+    asked = []
     _turn("What did you see today?", brain, display=display, clock=lambda: 1000.0,
           recall_fn=lambda query: Recalled([], [], recent=["Sasha: hi — Reachy: hello"]),
           recall_seen_fn=lambda query, direction=None: [],
-          day_frames_fn=lambda: day)
+          day_frames_fn=lambda query: asked.append(query) or day)
+    # The model's question picks the day's first picture (the picture search).
+    assert asked == ["what did you see today?"]
     request = brain.requests[1]
     assert request.image_jpegs == (b"FRAME", b"FRAME"), "both frames, one turn"
     assert request.tool_result is None, "pictures and a tool result cannot travel together"
@@ -1228,7 +1251,7 @@ def test_a_day_with_no_frames_falls_through_to_the_words():
     _turn("What did you see today?", brain, clock=lambda: 1000.0,
           recall_fn=lambda query: Recalled([], [], recent=["Sasha: hi — Reachy: hello"]),
           recall_seen_fn=lambda query, direction=None: [],
-          day_frames_fn=lambda: (day_asked.append(1), [])[1])
+          day_frames_fn=lambda query: (day_asked.append(1), [])[1])
     assert day_asked == [1]
     assert brain.requests[1].image_jpegs == ()
     assert brain.requests[1].tool_result is not None
@@ -1244,7 +1267,7 @@ def test_a_seen_question_a_frame_s_words_answer_gets_that_frame_not_the_day():
                    {"reply": "Yes, I saw Sasha.", "token_count": 1})
     _turn("Did you see Sasha?", brain, clock=lambda: 1000.0,
           recall_seen_fn=lambda query, direction=None: [sasha],
-          day_frames_fn=lambda: pytest.fail("a frame answered: not the day"))
+          day_frames_fn=lambda query: pytest.fail("a frame answered: not the day"))
     request = brain.requests[1]
     assert request.image_jpegs == (b"FRAME",)
     assert "Sasha was in it" in request.image_note
@@ -1259,7 +1282,7 @@ def test_a_side_with_no_look_that_way_is_not_answered_with_the_day():
     _turn("What was on your left?", brain, clock=lambda: 1000.0,
           recall_fn=lambda query: Recalled([], []),
           recall_seen_fn=lambda query, direction=None: [],
-          day_frames_fn=lambda: pytest.fail("not the day"))
+          day_frames_fn=lambda query: pytest.fail("not the day"))
     assert brain.requests[1].tool_result["result"] == {
         "note": "Nothing in your memory about this."}
 
@@ -1274,7 +1297,7 @@ def test_a_question_about_the_person_asking_is_answered_from_the_faces():
     _turn("Do you remember me?", brain, clock=lambda: 1000.0,
           recall_fn=lambda query: Recalled([], []),
           recall_seen_fn=lambda query, direction=None: pytest.fail("nor the frames' words"),
-          day_frames_fn=lambda: pytest.fail("nor the day"),
+          day_frames_fn=lambda query: pytest.fail("nor the day"),
           who_fn=lambda: {"in_front_of_you": ["Sasha"],
                           "you_met": ["Sasha, 2 hours ago"],
                           "you_last_saw_them": ["Sasha, 5 minutes ago"],
@@ -1346,7 +1369,7 @@ def test_a_question_that_names_something_is_still_a_search():
     _turn("What did I tell you about Qdrant?", brain,
           recall_fn=lambda query: found,
           recall_seen_fn=lambda query, direction=None: [],
-          day_frames_fn=lambda: pytest.fail("not `seen`: not the day"))
+          day_frames_fn=lambda query: pytest.fail("not `seen`: not the day"))
     assert brain.requests[1].tool_result["result"] == {
         "the_person_told_you_before": [told]}
 
@@ -1386,7 +1409,7 @@ def test_an_anything_question_that_names_nothing_is_answered_from_the_conversati
     _turn("What have you seen?", brain, clock=lambda: 1000.0,
           recall_fn=lambda query: found,
           recall_seen_fn=lambda query, direction=None: recall_seen(query, frame_memory=frames),
-          day_frames_fn=lambda: pytest.fail("`anything` never gets the day"))
+          day_frames_fn=lambda query: pytest.fail("`anything` never gets the day"))
     assert brain.requests[1].tool_result["result"] == {
         "you_talked_about": ["Sasha: hi — Reachy: hello"]}
 
@@ -1405,7 +1428,7 @@ def test_an_anything_question_about_what_was_seen_with_nothing_else_is_the_sight
     _turn("What did you see today?", brain, clock=lambda: 1000.0,
           recall_fn=lambda query: Recalled([], []),
           recall_seen_fn=lambda query, direction=None: recall_seen(query, frame_memory=frames),
-          day_frames_fn=lambda: pytest.fail("`anything` never gets the day"),
+          day_frames_fn=lambda query: pytest.fail("`anything` never gets the day"),
           who_fn=lambda: {"seen_earlier": ["Sasha, moments ago"]})
     assert brain.requests[1].tool_result["result"] == {"people_you_saw": ["Sasha, moments ago"]}
 
@@ -1495,7 +1518,7 @@ def test_the_facts_are_searched_for_every_question_but_one_about_the_person():
         _turn(question, brain, knowledge_fn=knowledge_fn,
               recall_fn=lambda query: Recalled([], []),
               recall_seen_fn=lambda query, direction=None: [],
-              day_frames_fn=lambda: [], who_fn=lambda: {})
+              day_frames_fn=lambda query: [], who_fn=lambda: {})
     assert asked == ["Do you remember the mug?", "What did we talk about?",
                      "What do you remember?", "How do you work?"]
 
@@ -1511,7 +1534,7 @@ def test_a_camera_call_is_the_camera_whatever_tense_the_question_is_in():
           camera_jpeg=lambda: b"NOW",
           recall_fn=lambda query: pytest.fail("not memory"),
           recall_seen_fn=lambda query, direction=None: pytest.fail("not memory"),
-          day_frames_fn=lambda: pytest.fail("not the day"))
+          day_frames_fn=lambda query: pytest.fail("not the day"))
     request = brain.requests[1]
     assert (request.image_jpeg, request.image_note) == (b"NOW", LOOK_NOTE)
 
@@ -1526,7 +1549,7 @@ def test_the_models_about_is_answered_as_it_was_given():
                    {"reply": "I saw a chair and a lamp.", "token_count": 1})
     _turn("Did you see me today?", brain, clock=lambda: 1000.0,
           recall_seen_fn=lambda query, direction=None: [],
-          day_frames_fn=lambda: day,
+          day_frames_fn=lambda query: day,
           who_fn=lambda: pytest.fail("not the faces: the model said `seen`"))
     assert len(brain.requests[1].image_jpegs) == 2
     brain = _Brain(_call("remember", "what did you see", about="anything"),
@@ -1534,7 +1557,7 @@ def test_the_models_about_is_answered_as_it_was_given():
     _turn("Did you see anything today?", brain, clock=lambda: 1000.0,
           recall_fn=lambda query: Recalled([], []),
           recall_seen_fn=lambda query, direction=None: [],
-          day_frames_fn=lambda: pytest.fail("not the day: the model said `anything`"))
+          day_frames_fn=lambda query: pytest.fail("not the day: the model said `anything`"))
     assert brain.requests[1].image_jpegs == ()
     assert brain.requests[1].tool_result is not None
 
@@ -1542,9 +1565,10 @@ def test_the_models_about_is_answered_as_it_was_given():
 def test_no_question_gets_a_picture_guess():
     """Live: "tell me about the universe" — about=anything — matched nothing
     by words, so the nearest-picture search ran and put a frame of the room
-    on the screen as a guess under an answer about galaxies. Now no question
-    gets that guess: `anything` gets the frames' words, `seen` the frames'
-    words and then the day — and with no day either, nothing."""
+    on the screen as a guess under an answer about galaxies. Now `anything`
+    gets the frames' words and never a picture; `seen` gets the frames' words
+    and then the day, led by the picture nearest the question — and with no
+    frames at all, nothing."""
     from demo.conversation import NOTHING_IN_MEMORY_NOTE
 
     frames = _Frames()
@@ -1556,7 +1580,7 @@ def test_no_question_gets_a_picture_guess():
                        {"reply": "...", "token_count": 1})
         _turn(question, brain, display=display, recall_fn=lambda query: Recalled([], []),
               recall_seen_fn=lambda query, direction=None: recall_seen(query, frame_memory=frames),
-              day_frames_fn=lambda: day_frames(frame_memory=frames))
+              day_frames_fn=lambda query: day_frames(query, frame_memory=frames))
         assert brain.requests[1].image_jpegs == (), question
         assert not [e for e in display.events if e[0] == "frames" and e[1]], question
     assert brain.requests[1].tool_result["result"] == {"note": NOTHING_IN_MEMORY_NOTE}
@@ -1598,7 +1622,7 @@ def test_a_seen_question_no_frame_s_words_answer_gets_the_day():
     brain = _Brain(_call("remember", "Nice, what did you see today?", about="seen"),
                    {"reply": "I saw a chair and a lamp.", "token_count": 1})
     _turn("Nice, what did you see today?", brain, clock=lambda: 1000.0,
-          recall_seen_fn=recall_seen_fn, day_frames_fn=lambda: day)
+          recall_seen_fn=recall_seen_fn, day_frames_fn=lambda query: day)
     assert len(brain.requests[1].image_jpegs) == 2
     assert asked == ["Nice, what did you see today?"]
 
@@ -1617,7 +1641,7 @@ def test_a_seen_question_about_a_thing_no_frame_holds_gets_the_day():
         _turn(question, brain, clock=lambda: 1000.0,
               recall_fn=lambda query: pytest.fail("not the conversation"),
               recall_seen_fn=lambda query, direction=None: [],
-              day_frames_fn=lambda: day)
+              day_frames_fn=lambda query: day)
         assert len(brain.requests[1].image_jpegs) == 2, question
         assert brain.requests[1].tool_result is None, question
 
@@ -1635,7 +1659,7 @@ def test_when_the_words_cannot_be_searched_the_memory_is_said_to_be_unavailable(
     brain = _Brain(_call("remember", "Did you see Sasha?", about="seen"),
                    {"reply": "I can't search my memory.", "token_count": 1})
     _turn("Did you see Sasha?", brain, clock=lambda: 1000.0,
-          recall_seen_fn=down, day_frames_fn=lambda: pytest.fail("not the day"))
+          recall_seen_fn=down, day_frames_fn=lambda query: pytest.fail("not the day"))
     assert brain.requests[1].image_jpegs == ()
     assert MEMORY_UNAVAILABLE_NOTE in str(brain.requests[1].tool_result["result"])
 
@@ -1648,7 +1672,7 @@ def test_the_old_recall_seen_name_is_a_question_about_what_was_seen():
                    {"reply": "I saw a chair.", "token_count": 1})
     _turn("What did you see?", brain, clock=lambda: 1000.0,
           recall_fn=lambda query: pytest.fail("not the conversation"),
-          recall_seen_fn=lambda query, direction=None: [], day_frames_fn=lambda: day)
+          recall_seen_fn=lambda query, direction=None: [], day_frames_fn=lambda query: day)
     assert len(brain.requests[1].image_jpegs) == 2
 
 
@@ -1660,7 +1684,7 @@ def test_a_said_question_never_touches_the_frames():
                    {"reply": "Anna.", "token_count": 1})
     _turn("What did I say about my sister?", brain, recall_fn=lambda query: found,
           recall_seen_fn=lambda query, direction=None: pytest.fail("no frames"),
-          day_frames_fn=lambda: pytest.fail("nor the day"))
+          day_frames_fn=lambda query: pytest.fail("nor the day"))
     assert brain.requests[1].tool_result["result"] == {"the_person_told_you_before": [told]}
 
 
@@ -1678,7 +1702,7 @@ def test_a_side_asked_about_as_anything_with_no_look_that_way_is_nothing():
                    {"reply": "I did not look there.", "token_count": 1})
     _turn("What was on your left?", brain, clock=lambda: 1000.0,
           recall_fn=lambda query: Recalled([], []), recall_seen_fn=recall_seen_fn,
-          day_frames_fn=lambda: pytest.fail("not the day"))
+          day_frames_fn=lambda query: pytest.fail("not the day"))
     assert asked == ["left"]
     assert brain.requests[1].tool_result["result"] == {"note": NOTHING_IN_MEMORY_NOTE}
 
